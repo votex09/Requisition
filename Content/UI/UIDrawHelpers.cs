@@ -13,6 +13,11 @@ namespace TerraStorage.Content.UI
     // Shared drawing helpers for all Requisition UI panels.
     internal static class UIDrawHelpers
     {
+        // Shared scissor rasterizer for per-frame spriteBatch.Begin calls. RasterizerState is a
+        // finalizable GPU object; allocating one per frame is churn (see UIItemGrid's private
+        // twin — existing per-class statics intentionally stay to keep the diff minimal).
+        internal static readonly RasterizerState ScissorRasterizer = new() { ScissorTestEnable = true };
+
         private static Texture2D _pixel;
 
         private static Texture2D GetPixel(SpriteBatch sb)

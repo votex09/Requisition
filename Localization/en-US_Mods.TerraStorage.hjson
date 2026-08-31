@@ -158,6 +158,11 @@ Configs: {
 			Tooltip: Show 'In Storage: X' on item tooltips when a Terminal has been opened
 			Label: In Storage Tooltip
 		}
+
+		GridScrollRows: {
+			Tooltip: How many rows one mouse wheel notch scrolls in the item, recipe, NPC and disk panes (1-255)
+			Label: Grid Scroll Rows
+		}
 	}
 }
 
@@ -262,5 +267,30 @@ UI: {
 	VacuumBags: {
 		DepositButton: Deposit to Requisition
 		NoNetwork: No Requisition storage in range.
+	}
+
+	OperationFailed: {
+		Prefix: "Requisition: "
+		Unspecified: the storage network refused that operation.
+		RecipeNotFeasible: this recipe cannot be crafted from what the network can hand over.
+		NoRoomInInventory: no room in your inventory for the result.
+		NoRoomInStorageOrInventory: no room in storage or your inventory for the result.
+		CraftCostingNoLongerHolds: the craft was cancelled — storage no longer holds what the plan was costed against.
+		NothingWithdrawn: storage could not hand over that item.
+		NothingDeposited: storage did not accept that item.
+		NothingQuickStacked: nothing in your inventory matched what storage already holds.
+		NoStorageInRange: you are too far from a Crafting Terminal.
+		NoStorageConnected: that Terminal has no storage disks connected.
+		NoTerminalFound: that Crafting Terminal is no longer there.
+		NotAtDriveBay: you are too far from that Drive Bay.
+		DiskNotInSlot: that slot no longer holds that disk.
+		UpgradeUnavailable: that disk has no upgrade available.
+		MaterialsNoLongerAvailable: storage no longer holds the materials for that upgrade.
+		DiskNotFound: that Drive Bay is no longer there.
+		DiskRecoveryRefused: that disk cannot be recovered onto the replacement you are holding.
+		NothingToDefragment: there was nothing to defragment.
+		DiskClaimRefused: that disk belongs to another player.
+		DriveBaySlotUnavailable: that Drive Bay slot was filled first.
+		DriveBayNotOnNetwork: that Drive Bay is not connected to this Terminal.
 	}
 }

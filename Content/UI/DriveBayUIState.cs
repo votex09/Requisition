@@ -193,17 +193,40 @@ namespace TerraStorage.Content.UI
                 {
                     if (!_entity.DiskSlots[i].IsAir)
                     {
+                        // The server may refuse this, and taking the disk before it answers would
+                        // leave the refusal with nothing safe to do: correcting the bay would put a
+                        // second item carrying the same DiskId into the world, and not correcting it
+                        // would show a slot the server still considers full. So the server hands the
+                        // disk over, the way it already does for a withdrawal.
+                        if (Main.netMode == NetmodeID.MultiplayerClient)
+                        {
+                            NetworkHandler.SendSyncDiskRemove(mod, _entity.ID, i, routeToInventory: false);
+                            SoundEngine.PlaySound(SoundID.Grab);
+                            return;
+                        }
+
+                        var takenDiskId = GetDiskIdOf(_entity.DiskSlots[i]);
                         Main.mouseItem = _entity.DiskSlots[i].Clone();
                         _entity.DiskSlots[i].TurnToAir();
                         _entity.RefreshVisualState(_entity.IsConnected);
+                        NetworkHandler.DropOrphanedDiskData(takenDiskId);
                         SoundEngine.PlaySound(SoundID.Grab);
-                        NetworkHandler.SendSyncDiskRemove(mod, _entity.ID, i);
                     }
                 }
                 else
                 {
                     if (!_entity.DiskSlots[i].IsAir)
                     {
+                        // Same reason as the cursor path above; the server routes it into the
+                        // inventory and falls back to the cursor when that is full.
+                        if (Main.netMode == NetmodeID.MultiplayerClient)
+                        {
+                            NetworkHandler.SendSyncDiskRemove(mod, _entity.ID, i, routeToInventory: true);
+                            SoundEngine.PlaySound(SoundID.Grab);
+                            return;
+                        }
+
+                        var takenDiskId = GetDiskIdOf(_entity.DiskSlots[i]);
                         var item = _entity.DiskSlots[i].Clone();
                         // Directly place item in inventory instead of using ground pickup logic
                         bool placedInInventory = false;
@@ -245,13 +268,22 @@ namespace TerraStorage.Content.UI
                         {
                             _entity.DiskSlots[i].TurnToAir();
                             _entity.RefreshVisualState(_entity.IsConnected);
-                            NetworkHandler.SendSyncDiskRemove(mod, _entity.ID, i);
+                            NetworkHandler.DropOrphanedDiskData(takenDiskId);
                         }
                         SoundEngine.PlaySound(SoundID.Grab);
                     }
                 }
                 return;
             }
+        }
+
+        // Read before the slot is cleared: afterwards the item carrying the GUID is gone.
+        private static System.Guid GetDiskIdOf(Item slotItem)
+        {
+            if (slotItem == null || slotItem.IsAir || slotItem.ModItem is not StorageDiskBase disk)
+                return System.Guid.Empty;
+
+            return disk.DiskId;
         }
 
         // Returns true if the mouse is over the given vanilla inventory slot index (0–49).

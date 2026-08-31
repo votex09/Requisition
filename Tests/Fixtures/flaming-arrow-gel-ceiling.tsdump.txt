@@ -1,0 +1,18 @@
+# /tsdump slice, minimised: the same world later, with wood and stone in bulk but still 2 torches.
+# The direct-stock formula reads those 2 torches as the ceiling. The real ceiling is the gel: 107
+# gel makes 321 more torches, so 323 crafts (3230 arrows) are possible, not 2.
+# Minimised: drop any GROUPS or RECIPES line below, or any STORAGE line but the arrows, and the
+# answer changes.
+STATIONS: 18 16 17 94 4 215 13 103 106
+CONDITIONS: 
+STORAGE:
+8 2
+9 4472
+3 1769
+23 107
+40 2626
+GROUPS:
+RECIPES:
+8:3 | 23:1,9:1 | tiles: | groups:19
+40:25 | 9:1,3:1 | tiles:18 | groups:19
+41:10 | 40:10,8:1 | tiles: | groups:

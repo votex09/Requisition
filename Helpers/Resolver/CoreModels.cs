@@ -47,12 +47,20 @@ namespace TerraStorage.Helpers.Resolver
     public struct IngredientView
     {
         public int Type;
-        // Units actually held (own type plus recipe-group substitutes). Never inflated by what
-        // could be sub-crafted — recursive craftability is signalled by HasRecipe, not by faking stock.
+        // Units drawn for this slot from the shared pool (own type plus recipe-group substitutes),
+        // capped at Needed. Never inflated by what could be sub-crafted — that is Satisfiable's job.
+        // Slots are filled in recipe order, so an earlier slot's sub-craft can legitimately claim
+        // base material a later slot would otherwise have drawn; a later slot then reports what is
+        // still free for it rather than the raw stack count.
         public int TotalHave;
+        // Sum of every slot naming this item type, times the craft amount.
         public int Needed;
         public bool HasRecipe;
         public bool IsGroup;
+        // True if this slot can be filled from the shared pool - directly, or by sub-crafting the
+        // remainder. False marks the slot as one actually blocking the recipe, which is what the
+        // panel colours red; a short-but-satisfiable slot is not the player's problem.
+        public bool Satisfiable;
     }
 
     // Everything the resolution algorithm needs to know about the recipe world, abstracted away

@@ -72,12 +72,6 @@ namespace TerraStorage.Content.UI
             _isOpen = false;
         }
 
-        public override void PreUpdatePlayers()
-        {
-            if (!Main.dedServ && IsMouseOverPanel())
-                Main.LocalPlayer.mouseInterface = true;
-        }
-
         public override void UpdateUI(GameTime gameTime)
         {
             if (_isOpen)

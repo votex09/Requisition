@@ -74,7 +74,7 @@ namespace TerraStorage.Content.Players
                 // Server must perform the archive because StorageWorldSystem is server-authoritative.
                 // The server will send back the updated disk item via ArchiveDiskResult.
                 NetworkHandler.SendArchiveDiskRequest(
-                    ModLoader.GetMod("TerraStorage"), Main.myPlayer, slot, disk.DiskId);
+                    ModLoader.GetMod("TerraStorage"), slot, disk.DiskId);
             }
         }
 

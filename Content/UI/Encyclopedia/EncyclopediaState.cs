@@ -349,11 +349,13 @@ namespace TerraStorage.Content.UI.Encyclopedia
             if (_allItems == null) return;
 
             bool hasSearch = !string.IsNullOrEmpty(search);
+            // Parsed once: the query is the same for every item in the sweep below.
+            var (searchMode, searchQuery) = ItemSearchHelper.Parse(search);
 
             _filteredItems.Clear();
             foreach (var ci in _allItems)
             {
-                if (hasSearch && !ItemSearchHelper.Matches(ci.ItemType, search))
+                if (hasSearch && !ItemSearchHelper.Matches(ci.ItemType, searchMode, searchQuery))
                     continue;
                 if (_filterBar != null && !_filterBar.PassesFilter(ci.ItemType))
                     continue;
@@ -1298,7 +1300,10 @@ namespace TerraStorage.Content.UI.Encyclopedia
         {
             base.ScrollWheel(evt);
             if (_scrollbar != null)
-                _scrollbar.ViewPosition -= evt.ScrollWheelValue / 120f;
+            {
+                int gridScrollRows = RequisitionClientConfig.GetGridScrollRows();
+                _scrollbar.ViewPosition -= evt.ScrollWheelValue / 120f * gridScrollRows;
+            }
         }
 
         public override void LeftClick(UIMouseEvent evt)
@@ -1425,7 +1430,15 @@ namespace TerraStorage.Content.UI.Encyclopedia
             public int ResultStack;
             public string[] Conditions;
             public int RecipeIndex;
+            // Precomputed in AddRecipe; DrawSelf runs every frame and must not build strings.
+            public string ConditionsText;
+            public string MakesText;
         }
+
+        // Nav label rebuilt only when the shown index or recipe count changes.
+        private string _navText;
+        private int _navTextIndex = -1;
+        private int _navTextCount = -1;
 
         public UIRecipeCarousel(float contentWidth, int stationSize, int ingredientSize, Action<int> onItemClicked)
         {
@@ -1444,7 +1457,13 @@ namespace TerraStorage.Content.UI.Encyclopedia
                 Ingredients = new List<(int, int, int?)>(),
                 ResultStack = recipe.ResultStack,
                 Conditions = recipe.ConditionDescriptions,
-                RecipeIndex = recipe.RecipeIndex
+                RecipeIndex = recipe.RecipeIndex,
+                ConditionsText = recipe.ConditionDescriptions.Length > 0
+                    ? "? " + string.Join(", ", recipe.ConditionDescriptions)
+                    : null,
+                MakesText = recipe.ResultStack > 1
+                    ? Language.GetText("Mods.TerraStorage.UI.Encyclopedia.Makes").Format(recipe.ResultStack)
+                    : null,
             };
 
             foreach (int tileId in recipe.RequiredTiles)
@@ -1504,7 +1523,13 @@ namespace TerraStorage.Content.UI.Encyclopedia
             // Nav bar
             if (_recipes.Count > 1)
             {
-                string navText = $"{_currentIndex + 1} / {_recipes.Count}";
+                if (_navTextIndex != _currentIndex || _navTextCount != _recipes.Count)
+                {
+                    _navTextIndex = _currentIndex;
+                    _navTextCount = _recipes.Count;
+                    _navText = $"{_currentIndex + 1} / {_recipes.Count}";
+                }
+                string navText = _navText;
                 float navCenterX = dims.X + dims.Width / 2f;
                 Utils.DrawBorderString(spriteBatch, navText,
                     new Vector2(navCenterX, dims.Y + 3), Color.White, 0.75f, 0.5f, 0f);
@@ -1604,18 +1629,18 @@ namespace TerraStorage.Content.UI.Encyclopedia
             }
 
             // Conditions (inside the recipe area)
-            if (recipe.Conditions.Length > 0)
+            if (recipe.ConditionsText != null)
             {
                 Utils.DrawBorderString(spriteBatch,
-                    "? " + string.Join(", ", recipe.Conditions),
+                    recipe.ConditionsText,
                     new Vector2(dims.X + 4, y + 2),
                     new Color(200, 200, 100), 0.65f);
             }
 
             // Result stack indicator
-            if (recipe.ResultStack > 1)
+            if (recipe.MakesText != null)
             {
-                Utils.DrawBorderString(spriteBatch, Language.GetText("Mods.TerraStorage.UI.Encyclopedia.Makes").Format(recipe.ResultStack),
+                Utils.DrawBorderString(spriteBatch, recipe.MakesText,
                     new Vector2(dims.X + dims.Width - 4, contentY + 4),
                     new Color(200, 200, 100), 0.6f, 1f, 0f);
             }

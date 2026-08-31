@@ -39,10 +39,18 @@ namespace TerraStorage.Systems
             }
         }
 
-        // Get all recipes that produce the given item type. 
+        // Shared miss result: GetRecipesFor is called from per-frame draw paths (Crafting Tree
+        // node indicators), where allocating a fresh empty list per call is churn. Callers only
+        // read the result.
+        private static readonly List<Recipe> Empty = new();
+
+        // Get all recipes that produce the given item type. Do not mutate the result.
         public List<Recipe> GetRecipesFor(int itemType)
         {
-            return RecipesByResult.TryGetValue(itemType, out var recipes) ? recipes : new List<Recipe>();
+            return RecipesByResult.TryGetValue(itemType, out var recipes) ? recipes : Empty;
         }
+
+        // Allocation-free existence check for per-frame callers.
+        public bool HasRecipesFor(int itemType) => RecipesByResult.ContainsKey(itemType);
     }
 }

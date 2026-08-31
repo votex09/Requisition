@@ -154,7 +154,7 @@ namespace TerraStorage.Content.UI
             if (Main.netMode == NetmodeID.MultiplayerClient && _connectedDiskIds.Count > 0)
             {
                 var mod = ModLoader.GetMod("TerraStorage");
-                NetworkHandler.SendRequestDiskData(mod, _connectedDiskIds);
+                NetworkHandler.SendRequestDiskData(mod, _terminal.ID);
             }
 
             RefreshItems();
@@ -426,15 +426,17 @@ namespace TerraStorage.Content.UI
                 _availableStations = stations;
                 _availableConditions = conditions;
 
-                // In MP, request data for any disk IDs we don't have locally yet.
+                // In MP, request data when any disk ID is one we don't have locally yet.
                 // This covers the case where the drive bay entity wasn't synced yet
-                // when SetTerminal first ran, so the initial request was skipped.
+                // when SetTerminal first ran, so the initial request was skipped. The packet names
+                // the Terminal rather than the missing IDs, so the answer covers the whole network —
+                // it is only sent when something is genuinely missing, which is rare.
                 if (Main.netMode == NetmodeID.MultiplayerClient)
                 {
                     var sys = StorageWorldSystem.Instance;
-                    var unknown = newIds.Where(id => !sys.HasDiskData(id)).ToList();
-                    if (unknown.Count > 0)
-                        NetworkHandler.SendRequestDiskData(ModLoader.GetMod("TerraStorage"), unknown);
+                    bool anyDiskUnknown = newIds.Any(id => !sys.HasDiskData(id));
+                    if (anyDiskUnknown)
+                        NetworkHandler.SendRequestDiskData(ModLoader.GetMod("TerraStorage"), _terminal.ID);
                 }
 
                 _connectedDiskIds = newIds;
@@ -448,6 +450,7 @@ namespace TerraStorage.Content.UI
 
             if (_activeTab == ActiveTab.Crafting)
             {
+                _craftingPanel.SetTerminal(_terminal);
                 _craftingPanel.SetAvailableStations(_availableStations);
                 _craftingPanel.SetConditions(_availableConditions);
                 _craftingPanel.SetDiskIds(_connectedDiskIds);
@@ -460,7 +463,7 @@ namespace TerraStorage.Content.UI
             }
 
             FavoritedRecipesPanelSystem.Instance?.SetDiskIds(_connectedDiskIds);
-            StoragePlayerSystem.Local.SetLastOpenedDiskIds(_connectedDiskIds);
+            StoragePlayerSystem.Local.SetLastOpenedDiskIds(_connectedDiskIds, _terminal?.ID ?? -1);
         }
 
         private (int used, int max) GetStorageCapacity()
@@ -501,6 +504,8 @@ namespace TerraStorage.Content.UI
             var player = StoragePlayerSystem.Local;
             var search = _searchBar?.SearchText ?? "";
             bool hasSearch = !string.IsNullOrEmpty(search);
+            // Parsed once: the query is the same for every item in the sweep below.
+            var (searchMode, searchQuery) = ItemSearchHelper.Parse(search);
             bool hasFilter = _filterBar != null;
 
             var favorited = new List<ConsolidatedItem>();
@@ -514,7 +519,7 @@ namespace TerraStorage.Content.UI
                 }
                 else
                 {
-                    if (hasSearch && !ItemSearchHelper.Matches(ci.ItemType, search))
+                    if (hasSearch && !ItemSearchHelper.Matches(ci.ItemType, searchMode, searchQuery))
                         continue;
                     if (hasFilter && !_filterBar.PassesFilter(ci.ItemType))
                         continue;
@@ -659,7 +664,7 @@ namespace TerraStorage.Content.UI
                 if (Main.netMode == NetmodeID.MultiplayerClient)
                 {
                     var mod = ModLoader.GetMod("TerraStorage");
-                    NetworkHandler.SendWithdrawItemByModData(mod, _connectedDiskIds, item.ModData, shift);
+                    NetworkHandler.SendWithdrawItemByModData(mod, _terminal.ID, item.ModData, shift);
                     SoundEngine.PlaySound(SoundID.Grab);
                     return;
                 }
@@ -671,7 +676,7 @@ namespace TerraStorage.Content.UI
                 if (Main.netMode == NetmodeID.MultiplayerClient)
                 {
                     var mod = ModLoader.GetMod("TerraStorage");
-                    NetworkHandler.SendWithdrawItemByFullItemTag(mod, _connectedDiskIds, item.FullItemTag, shift);
+                    NetworkHandler.SendWithdrawItemByFullItemTag(mod, _terminal.ID, item.FullItemTag, shift);
                     SoundEngine.PlaySound(SoundID.Grab);
                     return;
                 }
@@ -686,7 +691,7 @@ namespace TerraStorage.Content.UI
                 if (Main.netMode == NetmodeID.MultiplayerClient)
                 {
                     var mod = ModLoader.GetMod("TerraStorage");
-                    NetworkHandler.SendWithdrawItem(mod, _connectedDiskIds, item.ItemType, withdrawCount, item.PrefixId, shift);
+                    NetworkHandler.SendWithdrawItem(mod, _terminal.ID, item.ItemType, withdrawCount, item.PrefixId, shift);
                     SoundEngine.PlaySound(SoundID.Grab);
                     return;
                 }
@@ -730,7 +735,7 @@ namespace TerraStorage.Content.UI
                 if (Main.netMode == NetmodeID.MultiplayerClient)
                 {
                     var mod = ModLoader.GetMod("TerraStorage");
-                    NetworkHandler.SendWithdrawItemByModData(mod, _connectedDiskIds, item.ModData);
+                    NetworkHandler.SendWithdrawItemByModData(mod, _terminal.ID, item.ModData);
                     SoundEngine.PlaySound(SoundID.Grab);
                     return;
                 }
@@ -741,7 +746,7 @@ namespace TerraStorage.Content.UI
                 if (Main.netMode == NetmodeID.MultiplayerClient)
                 {
                     var mod = ModLoader.GetMod("TerraStorage");
-                    NetworkHandler.SendWithdrawItemByFullItemTag(mod, _connectedDiskIds, item.FullItemTag);
+                    NetworkHandler.SendWithdrawItemByFullItemTag(mod, _terminal.ID, item.FullItemTag);
                     SoundEngine.PlaySound(SoundID.Grab);
                     return;
                 }
@@ -752,7 +757,7 @@ namespace TerraStorage.Content.UI
                 if (Main.netMode == NetmodeID.MultiplayerClient)
                 {
                     var mod = ModLoader.GetMod("TerraStorage");
-                    NetworkHandler.SendWithdrawItem(mod, _connectedDiskIds, item.ItemType, count, item.PrefixId);
+                    NetworkHandler.SendWithdrawItem(mod, _terminal.ID, item.ItemType, count, item.PrefixId);
                     SoundEngine.PlaySound(SoundID.Grab);
                     return;
                 }
@@ -805,7 +810,7 @@ namespace TerraStorage.Content.UI
             if (Main.netMode == NetmodeID.MultiplayerClient)
             {
                 var mod = ModLoader.GetMod("TerraStorage");
-                NetworkHandler.SendDepositItem(mod, _connectedDiskIds, Main.mouseItem);
+                NetworkHandler.SendDepositItem(mod, _terminal.ID, Main.mouseItem);
                 Main.mouseItem.TurnToAir();
                 SoundEngine.PlaySound(SoundID.Grab);
                 return;
@@ -840,7 +845,7 @@ namespace TerraStorage.Content.UI
 
                 if (Main.netMode == NetmodeID.MultiplayerClient)
                 {
-                    NetworkHandler.SendDepositItem(mod, _connectedDiskIds, player.inventory[i]);
+                    NetworkHandler.SendDepositItem(mod, _terminal.ID, player.inventory[i]);
                     player.inventory[i].TurnToAir();
                 }
                 else
@@ -924,7 +929,7 @@ namespace TerraStorage.Content.UI
                     if (Main.netMode == NetmodeID.MultiplayerClient)
                     {
                         var mod = ModLoader.GetMod("TerraStorage");
-                        NetworkHandler.SendDepositItem(mod, _connectedDiskIds, Main.LocalPlayer.inventory[i]);
+                        NetworkHandler.SendDepositItem(mod, _terminal.ID, Main.LocalPlayer.inventory[i]);
                         Main.LocalPlayer.inventory[i].TurnToAir();
                     }
                     else

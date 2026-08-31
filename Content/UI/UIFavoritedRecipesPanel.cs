@@ -39,8 +39,9 @@ namespace TerraStorage.Content.UI
         //Checks if the mouse is over the panel bounds.
         public bool IsMouseOverPanel()
         {
+            EnsureCaches();
             var m = Main.MouseScreen;
-            float bodyH = IsCollapsed ? 0f : Math.Min(ComputeBodyHeight(StoragePlayerSystem.Local.FavoritedRecipes), MaxBodyH);
+            float bodyH = IsCollapsed ? 0f : Math.Min(_rowCache.BodyHeight, MaxBodyH);
             float totalH = HeaderHeight + bodyH;
             return m.X >= PanelLeft && m.X <= PanelLeft + PanelWidth
                 && m.Y >= PanelTop && m.Y <= PanelTop + totalH;
@@ -65,7 +66,108 @@ namespace TerraStorage.Content.UI
         // Hover tooltip state (set during DrawBody, read after draw)
         private string _hoveredTooltip;
 
-        public void SetDiskIds(List<Guid> ids) => _diskIds = ids ?? new();
+        // The panel draws every frame while pinned, so nothing storage-derived may be computed
+        // per frame: rows rebuild on FavoritesVersion, the storage snapshot on StorageVersion /
+        // disk-set change, and slot strings only when their count changed. The inventory has no
+        // version counter, so its counts are the one per-frame input — a single 50-slot pass
+        // into a reused dictionary.
+        private readonly FavoritesRowCache _rowCache = new();
+        private Dictionary<int, int> _storageCounts = new();
+        private readonly Dictionary<int, int> _invCounts = new();
+        private int _diskIdsToken;
+
+        // Hover item cached per type; Main.HoverItem always receives a Clone because tooltip
+        // code mutates HoverItem fields across frames (see UIItemGrid.GetOrCreateDrawItem).
+        private Item _hoverItem = new();
+        private int _hoverItemType = -1;
+
+        public void SetDiskIds(List<Guid> ids)
+        {
+            _diskIds = ids ?? new();
+            _diskIdsToken++;
+        }
+
+        // Called on world unload: the panel outlives worlds and characters, and neither
+        // FavoritesVersion nor StorageVersion is guaranteed to differ in the next session,
+        // so everything derived from them must be dropped here (see FavoritesRowCache.
+        // ResetVersionStamps). Without this, a pinned panel entering another world shows the
+        // previous session's rows and counts — and alt-click on a stale row would toggle the
+        // wrong recipe for the new character.
+        public void ResetCaches()
+        {
+            _rowCache.ResetVersionStamps();
+            _rowCache.Rows.Clear();
+            _recipeOutputRects.Clear();
+            _diskIds = new List<Guid>();
+            _diskIdsToken++;
+            _storageCounts = new Dictionary<int, int>();
+            _invCounts.Clear();
+            _hoverItemType = -1;
+        }
+
+        private void EnsureCaches()
+        {
+            var player = StoragePlayerSystem.Local;
+            if (_rowCache.NeedsRowRebuild(player.FavoritesVersion))
+            {
+                _rowCache.Rows.Clear();
+                foreach (int recipeIdx in player.FavoritedRecipes)
+                {
+                    if (recipeIdx < 0 || recipeIdx >= Recipe.numRecipes) continue;
+                    var recipe = Main.recipe[recipeIdx];
+
+                    var row = new FavoritesRowCache.Row
+                    {
+                        RecipeIndex = recipeIdx,
+                        OutputType = recipe.createItem.type,
+                    };
+                    foreach (var ingredient in recipe.requiredItem)
+                    {
+                        if (ingredient.type <= ItemID.None) continue;
+                        row.Slots.Add(new FavoritesRowCache.Slot
+                        {
+                            ItemType = ingredient.type,
+                            Needed = ingredient.stack,
+                        });
+                    }
+                    _rowCache.Rows.Add(row);
+                }
+                _rowCache.MarkRowsRebuilt(player.FavoritesVersion);
+            }
+
+            long storageVersion = StorageWorldSystem.Instance?.StorageVersion ?? 0;
+            if (_rowCache.NeedsStorageRefresh(storageVersion, _diskIdsToken))
+            {
+                _storageCounts = _diskIds.Count > 0
+                    ? StorageWorldSystem.Instance.GetItemCounts(_diskIds)
+                    : new Dictionary<int, int>();
+                _rowCache.MarkStorageRefreshed(storageVersion, _diskIdsToken);
+            }
+        }
+
+        private void RefreshInventoryCounts()
+        {
+            _invCounts.Clear();
+            var inventory = Main.LocalPlayer.inventory;
+            for (int i = 0; i < 50; i++)
+            {
+                var item = inventory[i];
+                if (item == null || item.IsAir) continue;
+                _invCounts.TryGetValue(item.type, out int count);
+                _invCounts[item.type] = count + item.stack;
+            }
+        }
+
+        private Item GetHoverItem(int itemType)
+        {
+            if (_hoverItemType != itemType)
+            {
+                _hoverItem = new Item();
+                _hoverItem.SetDefaults(itemType);
+                _hoverItemType = itemType;
+            }
+            return _hoverItem;
+        }
 
         public void TogglePinned()
         {
@@ -198,9 +300,9 @@ namespace TerraStorage.Content.UI
             float alpha     = ghostMode ? 0.55f : 1f;  // text/icon alpha
             float bgAlpha   = ghostMode ? 0f    : 1f;  // background alpha — hidden in ghost mode
 
-            var favorites = StoragePlayerSystem.Local.FavoritedRecipes;
+            EnsureCaches();
 
-            float bodyH  = IsCollapsed ? 0f : Math.Min(ComputeBodyHeight(favorites), MaxBodyH);
+            float bodyH  = IsCollapsed ? 0f : Math.Min(_rowCache.BodyHeight, MaxBodyH);
             float totalH = HeaderHeight + bodyH;
 
             var panelRect = new Rectangle((int)PanelLeft, (int)PanelTop, (int)PanelWidth, (int)totalH);
@@ -247,8 +349,7 @@ namespace TerraStorage.Content.UI
 
             // ── Body ────────────────────────────────────────────────────────
             float viewH   = bodyH;
-            float fullH   = ComputeBodyHeight(favorites);
-            _maxScroll    = Math.Max(0f, fullH - viewH);
+            _maxScroll    = Math.Max(0f, _rowCache.BodyHeight - viewH);
             _scrollOffset = Math.Clamp(_scrollOffset, 0f, _maxScroll);
 
             // Scissor clip ensures items scrolled above/below the body area are hidden.
@@ -261,14 +362,13 @@ namespace TerraStorage.Content.UI
 
             var savedScissor = spriteBatch.GraphicsDevice.ScissorRectangle;
             spriteBatch.End();
-            var rs = new Microsoft.Xna.Framework.Graphics.RasterizerState { ScissorTestEnable = true };
             spriteBatch.Begin(SpriteSortMode.Deferred,
                 BlendState.AlphaBlend, SamplerState.AnisotropicClamp,
-                DepthStencilState.None, rs, null, Main.UIScaleMatrix);
+                DepthStencilState.None, UIDrawHelpers.ScissorRasterizer, null, Main.UIScaleMatrix);
             spriteBatch.GraphicsDevice.ScissorRectangle = clipRect;
 
             float y = PanelTop + HeaderHeight - _scrollOffset;
-            DrawBody(spriteBatch, favorites, ref y, ghostMode, alpha);
+            DrawBody(spriteBatch, ref y, ghostMode, alpha);
 
             spriteBatch.End();
             spriteBatch.Begin(SpriteSortMode.Deferred,
@@ -288,7 +388,7 @@ namespace TerraStorage.Content.UI
                 Utils.DrawInvBG(spriteBatch, new Rectangle((int)sbX, (int)thumbY, 4, (int)thumbH), new Color(89, 116, 213) * 0.9f);
             }
 
-            if (favorites.Count == 0)
+            if (_rowCache.Rows.Count == 0)
             {
                 Utils.DrawBorderString(spriteBatch, Language.GetTextValue("Mods.TerraStorage.UI.FavoritedRecipes.NoFavorites"),
                     new Vector2(PanelLeft + 8, PanelTop + HeaderHeight + 6), Color.Gray * alpha, 0.7f);
@@ -299,38 +399,41 @@ namespace TerraStorage.Content.UI
                 Main.hoverItemName = _hoveredTooltip;
         }
 
-        private void DrawBody(SpriteBatch spriteBatch, IReadOnlyCollection<int> favorites, ref float y, bool ghostMode, float alpha)
+        private void DrawBody(SpriteBatch spriteBatch, ref float y, bool ghostMode, float alpha)
         {
             _recipeOutputRects.Clear();
+            RefreshInventoryCounts();
             var mouse = Main.MouseScreen.ToPoint();
 
-            const float RowH      = OutputSlotSize + 4f;  // total height per recipe row
             const float innerOut  = OutputSlotSize - 6f;
             const float innerIng  = IngSlotSize    - 4f;
             const float ingOffset = (OutputSlotSize - IngSlotSize) / 2f; // center ing slots vertically
 
-            y += 3f;
+            y += FavoritesRowCache.TopPad;
 
-            foreach (int recipeIdx in favorites)
+            // Rows past the clipped body are drawn out of sight. Their hit rects must not be
+            // registered: alt-click is the vanilla favorite gesture, so an off-panel rect turns an
+            // ordinary inventory alt-click into unfavoriting a row the player cannot even see.
+            float bodyTop = PanelTop + HeaderHeight;
+            float bodyBottom = FavoritesRowCache.GetBodyBottom(bodyTop, _rowCache.BodyHeight, MaxBodyH);
+
+            foreach (var row in _rowCache.Rows)
             {
-                if (recipeIdx < 0 || recipeIdx >= Recipe.numRecipes) continue;
-                var recipe = Main.recipe[recipeIdx];
-
                 float rowY = y;
 
                 // ── Output slot (left) ───────────────────────────────────────
                 var outRect = new Rectangle((int)(PanelLeft + 4f), (int)rowY, (int)OutputSlotSize, (int)OutputSlotSize);
+                bool rowVisible = FavoritesRowCache.IsHitRectVisible(outRect.Bottom, bodyTop, bodyBottom);
                 if (!ghostMode)
                     Utils.DrawInvBG(spriteBatch, outRect, new Color(63, 82, 151) * 0.5f);
-                int itemType = recipe.createItem.type;
-                DrawItemInSlot(spriteBatch, itemType, outRect, innerOut, alpha);
-                _recipeOutputRects.Add((recipeIdx, outRect));
+                DrawItemInSlot(spriteBatch, row.OutputType, outRect, innerOut, alpha);
+                if (rowVisible)
+                    _recipeOutputRects.Add((row.RecipeIndex, outRect));
 
-                if (!ghostMode && outRect.Contains(mouse))
+                if (!ghostMode && rowVisible && outRect.Contains(mouse))
                 {
-                    var hoverItem = new Item();
-                    hoverItem.SetDefaults(itemType);
-                    Main.HoverItem  = hoverItem;
+                    var hoverItem = GetHoverItem(row.OutputType);
+                    Main.HoverItem  = hoverItem.Clone();
                     _hoveredTooltip = hoverItem.Name + "\nAlt+Click to unfavorite";
                 }
 
@@ -338,69 +441,55 @@ namespace TerraStorage.Content.UI
                 float ingX = PanelLeft + 4f + OutputSlotSize + 4f;
                 float ingY = rowY + ingOffset;
 
-                foreach (var ingredient in recipe.requiredItem)
+                foreach (var slot in row.Slots)
                 {
-                    if (ingredient.type <= ItemID.None) continue;
-
                     // Stop drawing if we'd overflow the panel
                     if (ingX + IngSlotSize > PanelLeft + PanelWidth - 8f) break;
 
-                    int needed    = ingredient.stack;
-                    int inStorage = _diskIds.Count > 0
-                        ? StorageWorldSystem.Instance.CountItem(_diskIds, ingredient.type)
-                        : 0;
-                    int inInv = CountPlayerItem(ingredient.type);
-                    int have  = inStorage + inInv;
+                    _storageCounts.TryGetValue(slot.ItemType, out int inStorage);
+                    _invCounts.TryGetValue(slot.ItemType, out int inInv);
+                    int have = inStorage + inInv;
+
+                    if (FavoritesRowCache.UpdateSlotCount(slot, have))
+                    {
+                        var countSize = FontAssets.MouseText.Value.MeasureString(slot.Text) * 0.45f;
+                        slot.TextWidth  = countSize.X;
+                        slot.TextHeight = countSize.Y;
+                    }
 
                     // Green = enough, yellow = partial, red = none.
-                    Color countColor = have >= needed ? Color.LightGreen
-                                     : have > 0      ? Color.Yellow
-                                     :                 Color.IndianRed;
+                    Color countColor = have >= slot.Needed ? Color.LightGreen
+                                     : have > 0            ? Color.Yellow
+                                     :                       Color.IndianRed;
 
                     var slotRect = new Rectangle((int)ingX, (int)ingY, (int)IngSlotSize, (int)IngSlotSize);
 
                     if (!ghostMode)
                         Utils.DrawInvBG(spriteBatch, slotRect, new Color(43, 56, 110) * 0.5f);
-                    DrawItemInSlot(spriteBatch, ingredient.type, slotRect, innerIng, alpha);
+                    DrawItemInSlot(spriteBatch, slot.ItemType, slotRect, innerIng, alpha);
 
-                    // Have/need count in bottom-right corner
-                    string countText = $"{have}/{needed}";
-                    var countSize = FontAssets.MouseText.Value.MeasureString(countText) * 0.45f;
-                    Utils.DrawBorderString(spriteBatch, countText,
-                        new Vector2(slotRect.Right - countSize.X - 1f, slotRect.Bottom - countSize.Y),
+                    Utils.DrawBorderString(spriteBatch, slot.Text,
+                        new Vector2(slotRect.Right - slot.TextWidth - 1f, slotRect.Bottom - slot.TextHeight),
                         countColor * alpha, 0.45f);
 
                     if (!ghostMode && slotRect.Contains(mouse))
                     {
-                        var hoverItem = new Item();
-                        hoverItem.SetDefaults(ingredient.type);
-                        Main.HoverItem  = hoverItem;
-                        _hoveredTooltip = $"{hoverItem.Name}\n{have}/{needed}";
+                        var hoverItem = GetHoverItem(slot.ItemType);
+                        Main.HoverItem  = hoverItem.Clone();
+                        _hoveredTooltip = $"{hoverItem.Name}\n{slot.Text}";
                     }
 
                     ingX += IngSlotSize + SlotGap;
                 }
 
-                y += RowH;
+                y += FavoritesRowCache.RowHeight;
             }
-        }
-
-        private static float ComputeBodyHeight(IReadOnlyCollection<int> favorites)
-        {
-            const float RowH = OutputSlotSize + 4f;
-            float total = 3f;
-
-            foreach (int recipeIdx in favorites)
-            {
-                if (recipeIdx < 0 || recipeIdx >= Recipe.numRecipes) continue;
-                total += RowH;
-            }
-            return total;
         }
 
         private Rectangle GetPanelRect()
         {
-            float bodyH = IsCollapsed ? 0f : Math.Min(ComputeBodyHeight(StoragePlayerSystem.Local.FavoritedRecipes), MaxBodyH);
+            EnsureCaches();
+            float bodyH = IsCollapsed ? 0f : Math.Min(_rowCache.BodyHeight, MaxBodyH);
             return new Rectangle((int)PanelLeft, (int)PanelTop, (int)PanelWidth, (int)(HeaderHeight + bodyH));
         }
 
@@ -421,14 +510,5 @@ namespace TerraStorage.Content.UI
                 new Vector2(srcRect.Width / 2f, srcRect.Height / 2f), scale, SpriteEffects.None, 0f);
         }
 
-        private static int CountPlayerItem(int itemType)
-        {
-            int count = 0;
-            var player = Main.LocalPlayer;
-            for (int i = 0; i < 50; i++)
-                if (player.inventory[i] != null && !player.inventory[i].IsAir && player.inventory[i].type == itemType)
-                    count += player.inventory[i].stack;
-            return count;
-        }
     }
 }

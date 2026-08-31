@@ -1,0 +1,18 @@
+# /tsdump slice, minimised: the reported world, where the MAX button offered 1 craft.
+# 3580 wooden arrows, NO torches, 114 gel, 3 units of a modded wood (13519) and 2 acorns.
+# 12 crafts are possible, and only if one torch slot is filled BOTH ways at once: 3 wood taken
+# from the group substitute in stock, the 4th sub-crafted as real wood out of the acorns.
+# Minimised: drop any STORAGE, GROUPS or RECIPES line below and the answer changes.
+STATIONS: 18 16 17
+CONDITIONS: 
+STORAGE:
+94 2
+13519 3
+40 3580
+23 114
+GROUPS:
+19 9 619 620 621 911 1729 2504 2503 5215 6233 6427 6809 8387 8504 9968 11466 11872 13519 13577
+RECIPES:
+8:3 | 23:1,9:1 | tiles: | groups:19
+41:10 | 40:10,8:1 | tiles: | groups:
+9:1 | 94:2 | tiles: | groups:

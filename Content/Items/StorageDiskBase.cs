@@ -43,6 +43,12 @@ namespace TerraStorage.Content.Items
             Item.rare = (int)Tier + 1;
         }
 
+        // Two registered disks are two different stores of items, whatever their tier. Stated to the
+        // game rather than left to maxStack, so anything that asks whether they may be pooled -
+        // storage's own defragment included - gets the right answer.
+        public override bool CanStack(Item source)
+            => source.ModItem is not StorageDiskBase other || (DiskId == Guid.Empty && other.DiskId == Guid.Empty);
+
         public override void OnCreated(ItemCreationContext context)
         {
             // GUIDs are intentionally NOT assigned here. A disk receives its GUID (and is
@@ -88,7 +94,10 @@ namespace TerraStorage.Content.Items
                     Stack = s.Stack,
                     PrefixId = s.PrefixId,
                     InsertionOrder = s.InsertionOrder,
-                    ModData = s.ModData
+                    ModData = s.ModData,
+                    // Carries other mods' per-instance GlobalItem state. Save and network both keep
+                    // it; dropping it here silently stripped enchantments on every MP bay insert.
+                    FullItemTag = s.FullItemTag
                 }).ToList();
             return clone;
         }
@@ -111,6 +120,18 @@ namespace TerraStorage.Content.Items
             DiskId = new Guid(reader.ReadBytes(16));
             IsArchived = reader.ReadBoolean();
             int count = reader.ReadInt32();
+
+            // The count sizes the list before a single stack is read, so a forged one allocates
+            // whatever it asks for. A disk cannot hold more stacks than its tier does, and Tier is
+            // the item's own compile-time property rather than anything the packet chose.
+            // tModLoader hands NetReceive a stream over exactly the bytes the sender declared, so
+            // leaving the list empty is safe: the unread remainder is its problem, not ours.
+            if (!WireCount.FitsDiskCapacity(count, Tier.GetCapacity()))
+            {
+                ArchivedItems = new List<StoredItemStack>();
+                return;
+            }
+
             ArchivedItems = new List<StoredItemStack>(count);
             for (int i = 0; i < count; i++)
                 ArchivedItems.Add(StoredItemStack.ReadNet(reader));
@@ -188,6 +209,15 @@ namespace TerraStorage.Content.Items
             DiskTier.Tier4 => new[] { new (int, int)[] { (ItemID.ChlorophyteBar, 10), (ItemID.SoulofSight, 2), (ItemID.Wire, 4) } },
             DiskTier.Tier5 => new[] { new (int, int)[] { (ItemID.ShroomiteBar,   10), (ItemID.Wire, 4) } },
             _              => null
+        };
+
+        // Answers "can this tier be upgraded" without building the options, so per-frame UI layout
+        // does not allocate. Must list exactly the tiers GetUpgradeOptions returns non-null for.
+        public static bool HasUpgradePath(DiskTier tier) => tier switch
+        {
+            DiskTier.Tier1 or DiskTier.Tier2 or DiskTier.Tier3
+                or DiskTier.Tier4 or DiskTier.Tier5 => true,
+            _                                       => false
         };
     }
 }

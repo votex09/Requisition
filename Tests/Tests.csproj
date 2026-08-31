@@ -16,12 +16,51 @@
     <!-- Link the shipped core source directly, so the tests exercise the exact code, not a copy. -->
     <Compile Include="..\Helpers\Resolver\CoreModels.cs" />
     <Compile Include="..\Helpers\Resolver\CoreResolver.cs" />
+    <!-- Which stacks a withdrawal or a defragment touches: the rule, without the NBT. -->
+    <Compile Include="..\Common\StackSelection.cs" />
+    <!-- How a withdrawal walks the disks: one sweep, one handle per group of units sharing state. -->
+    <Compile Include="..\Common\NetworkWithdrawal.cs" />
+    <!-- What makes a stored stack its own item rather than so many units of a type. -->
+    <Compile Include="..\Common\StackIdentity.cs" />
+    <!-- Which stacks on a disk a donor could merge into, without asking the rule about all of them. -->
+    <Compile Include="..\Common\MergeCandidateIndex.cs" />
+    <!-- The defragment sweep itself. StorageWorldSystem.Defragment is now a caller of this, so the
+         loop nesting, the merge index bookkeeping and the guards run here rather than a copy. -->
+    <Compile Include="..\Common\DefragmentCore.cs" />
+    <!-- Whether a count a packet supplied may size an allocation. -->
+    <Compile Include="..\Common\WireCount.cs" />
+    <!-- Whether the sender of a packet may name a particular disk GUID. -->
+    <Compile Include="..\Common\DiskClaim.cs" />
+    <!-- How close a player has to be to a block to operate it - one origin, not the UI's and the
+         server's disagreeing by the 1.5 tiles between a block's corner and its centre. -->
+    <Compile Include="..\Common\TerminalReach.cs" />
+    <!-- Whether a client may operate a Terminal, and when a disk's world entry may be dropped. -->
+    <Compile Include="..\Common\DiskAccess.cs" />
+    <!-- Deposit arithmetic: the pair of numbers a partial deposit has to keep straight. -->
+    <Compile Include="..\Common\DepositOutcome.cs" />
+    <!-- Why a storage operation was refused: the wire codes, the decisions behind them, and the
+         throttle that keeps a bulk denial to one line. Terraria-free so the runner executes the
+         real mapping rather than a copy - the packet code around it cannot be compiled here. -->
+    <Compile Include="..\Common\StorageOperationFailure.cs" />
+    <!-- Crafting transaction core: item movement bookkeeping, Terraria-free so it can be faked. -->
+    <Compile Include="..\Helpers\Resolver\CraftingTransaction.cs" />
     <!-- UI click arbitration: all three are Terraria-free precisely so they can be tested here. -->
     <Compile Include="..\Content\UI\WindowStackCore.cs" />
     <Compile Include="..\Content\UI\DepositGate.cs" />
     <Compile Include="..\Content\UI\UIClickBlocker.cs" />
+    <Compile Include="..\Content\UI\FavoritesRowCache.cs" />
+    <Compile Include="..\Content\UI\PanelRefreshCache.cs" />
     <Compile Include="FakeEnvironment.cs" />
+    <Compile Include="FakeStorage.cs" />
+    <Compile Include="HotPathBenchmarks.cs" />
+    <Compile Include="FakeDiskNetwork.cs" />
+    <!-- Stored stacks with no Terraria in them, and the mod state the merge rule compares. -->
+    <Compile Include="FakeDefragmentRules.cs" />
+    <!-- The pre-change withdrawal rule, kept so "unchanged for one-item callers" stays checkable. -->
+    <Compile Include="LegacySingleHandleDrain.cs" />
     <Compile Include="Program.cs" />
+    <!-- Scoped /tsdump slices: one scenario each, so a failure names the recipe that broke. -->
+    <None Include="Fixtures\*.tsdump.txt" CopyToOutputDirectory="Always" />
   </ItemGroup>
 
 </Project>

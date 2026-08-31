@@ -122,13 +122,13 @@ namespace TerraStorage.Systems
                     HandleSyncRemoveDiskData(reader);
                     break;
                 case PacketType.RestoreDiskRequest:
-                    HandleRestoreDiskRequest(mod, reader);
+                    HandleRestoreDiskRequest(mod, reader, whoAmI);
                     break;
                 case PacketType.UpgradeDiskRequest:
-                    HandleUpgradeDiskRequest(mod, reader);
+                    HandleUpgradeDiskRequest(mod, reader, whoAmI);
                     break;
                 case PacketType.DefragRequest:
-                    HandleDefragRequest(mod, reader);
+                    HandleDefragRequest(mod, reader, whoAmI);
                     break;
                 case PacketType.DeltaDiskData:
                     HandleDeltaDiskData(reader);
@@ -172,7 +172,12 @@ namespace TerraStorage.Systems
             packet.Send();
         }
 
-        public static void SendSyncDiskRemove(Mod mod, int entityId, int slot)
+        // routeToInventory says where the server should put the disk it takes out: the inventory
+        // (shift-click) or the cursor (plain click). The client no longer takes it itself, because a
+        // refusal then has to choose between two copies of one disk and a slot the server still
+        // considers full.
+        public static void SendSyncDiskRemove(Mod mod, int entityId, int slot,
+            bool routeToInventory = true)
         {
             if (Main.netMode == NetmodeID.SinglePlayer)
                 return;
@@ -181,6 +186,7 @@ namespace TerraStorage.Systems
             packet.Write((byte)PacketType.SyncDiskRemove);
             packet.Write(entityId);
             packet.Write(slot);
+            packet.Write(routeToInventory);
             packet.Send();
         }
 
@@ -190,6 +196,10 @@ namespace TerraStorage.Systems
             int slot = reader.ReadInt32();
             var item = ItemIO.Receive(reader, true);
 
+            // Fixed-size array, index off the wire — see HandleSyncDiskRemove.
+            if (slot < 0 || slot >= DriveBayEntity.DiskSlotCount)
+                return;
+
             DriveBayEntity sbe = null;
             if (Terraria.DataStructures.TileEntity.ByID.TryGetValue(entityId, out var entity)
                 && entity is DriveBayEntity blockEntity)
@@ -197,9 +207,31 @@ namespace TerraStorage.Systems
                 sbe = blockEntity;
                 if (Main.netMode == NetmodeID.Server)
                 {
+                    // The Drive Bay UI closes itself beyond this distance and is the only thing
+                    // that sends this packet, so requiring it costs no legitimate player anything.
+                    if (!SenderIsAtBlock(whoAmI, sbe.Position))
+                    {
+                        RefuseInsert(mod, whoAmI, sbe, item, StorageOperationFailure.NotAtDriveBay);
+                        return;
+                    }
+
+                    // The GUID on this item came off the wire, and every client is told every
+                    // disk's GUID, so naming one proves nothing about whose disk it is.
+                    var insertedDisk = item.ModItem as StorageDiskBase;
+                    if (insertedDisk != null && !SenderMayClaimDisk(whoAmI, insertedDisk.DiskId))
+                    {
+                        RefuseInsert(mod, whoAmI, sbe, item, StorageOperationFailure.DiskClaimRefused);
+                        return;
+                    }
+
                     // InsertDisk assigns the GUID and registers the disk in StorageWorldSystem
                     // so clients can retrieve disk data by the correct GUID via RequestDiskData.
-                    sbe.InsertDisk(item, slot);
+                    if (!sbe.InsertDisk(item, slot))
+                    {
+                        // The slot filled before this packet arrived.
+                        RefuseInsert(mod, whoAmI, sbe, item, StorageOperationFailure.DriveBaySlotUnavailable);
+                        return;
+                    }
                 }
                 else
                 {
@@ -227,23 +259,97 @@ namespace TerraStorage.Systems
         {
             int entityId = reader.ReadInt32();
             int slot = reader.ReadInt32();
+            bool routeToInventory = reader.ReadBoolean();
 
-            if (Terraria.DataStructures.TileEntity.ByID.TryGetValue(entityId, out var entity)
-                && entity is DriveBayEntity sbe)
+            // The slot index comes off the wire. DiskSlots is a fixed array, so an out-of-range
+            // value throws rather than doing anything useful.
+            if (slot < 0 || slot >= DriveBayEntity.DiskSlotCount
+                || !Terraria.DataStructures.TileEntity.ByID.TryGetValue(entityId, out var entity)
+                || entity is not DriveBayEntity sbe)
+                return;
+
+            sbe.EnsureSlotsInitialized();
+
+            if (Main.netMode != NetmodeID.Server)
             {
+                // The relay. The sender is included in it, because it no longer clears its own slot.
                 sbe.DiskSlots[slot] = new Item();
                 sbe.DiskSlots[slot].TurnToAir();
                 sbe.RefreshVisualState(sbe.IsConnected);
+                return;
             }
 
-            if (Main.netMode == NetmodeID.Server)
+            // Clearing a bay slot destroys the disk item while its stored contents live on orphaned.
+            // Refusing costs the sender nothing: it still has no copy of the disk, because only the
+            // server ever takes one out.
+            if (!SenderIsAtBlock(whoAmI, sbe.Position))
             {
-                var packet = mod.GetPacket();
-                packet.Write((byte)PacketType.SyncDiskRemove);
-                packet.Write(entityId);
-                packet.Write(slot);
-                packet.Send(-1, whoAmI);
+                SendSyncDriveBay(mod, sbe, whoAmI);
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.NotAtDriveBay);
+                return;
             }
+
+            var removedDisk = sbe.DiskSlots[slot];
+            if (removedDisk == null || removedDisk.IsAir)
+                return;
+
+            var removedDiskId = GetDiskIdInSlot(sbe, slot);
+
+            sbe.DiskSlots[slot] = new Item();
+            sbe.DiskSlots[slot].TurnToAir();
+
+            DropOrphanedDiskData(removedDiskId);
+            SendReturnItemToClient(mod, whoAmI, removedDisk, routeToInventory);
+
+            var packet = mod.GetPacket();
+            packet.Write((byte)PacketType.SyncDiskRemove);
+            packet.Write(entityId);
+            packet.Write(slot);
+            packet.Write(routeToInventory);
+            packet.Send(-1, -1);
+        }
+
+        private static Guid GetDiskIdInSlot(DriveBayEntity bay, int slot)
+        {
+            var slotItem = bay.DiskSlots[slot];
+            if (slotItem == null || slotItem.IsAir || slotItem.ModItem is not StorageDiskBase disk)
+                return Guid.Empty;
+
+            return disk.DiskId;
+        }
+
+        // A disk that leaves a bay holding nothing leaves an entry behind that nothing will ever
+        // remove, and every storage operation snapshots every entry — so a forged insert/remove
+        // loop grew a per-operation cost as well as the world save. An empty entry is safe to drop:
+        // it is a GUID and a tier, and the tier is re-read off the disk item on the next insert.
+        // Internal because singleplayer takes a disk out of a bay without a packet, so the UI calls
+        // this directly. Left only on the server path, empty entries accumulated in a singleplayer
+        // world until the next load purged them.
+        internal static void DropOrphanedDiskData(Guid diskId)
+        {
+            if (diskId == Guid.Empty)
+                return;
+
+            bool anotherBayHoldsDisk = IsDiskGuidInAnyDriveBay(diskId);
+            StorageWorldSystem.Instance?.PruneEmptyDiskData(diskId, anotherBayHoldsDisk);
+        }
+
+        private static bool IsDiskGuidInAnyDriveBay(Guid diskId)
+        {
+            foreach (var kvp in TileEntity.ByID)
+            {
+                if (kvp.Value is not DriveBayEntity bay)
+                    continue;
+
+                foreach (var slotItem in bay.DiskSlots)
+                {
+                    if (slotItem != null && !slotItem.IsAir
+                        && slotItem.ModItem is StorageDiskBase bayDisk && bayDisk.DiskId == diskId)
+                        return true;
+                }
+            }
+
+            return false;
         }
 
         // ─── Station Slot Sync (CraftingCore) ───────────────────────────
@@ -279,6 +385,10 @@ namespace TerraStorage.Systems
             int slot = reader.ReadInt32();
             var item = ItemIO.Receive(reader, true);
 
+            // Fixed-size array, index off the wire — the same guard the disk slots carry.
+            if (slot < 0 || slot >= CraftingCoreEntity.StationSlotCount)
+                return;
+
             if (Terraria.DataStructures.TileEntity.ByID.TryGetValue(entityId, out var entity)
                 && entity is CraftingCoreEntity cce)
             {
@@ -302,6 +412,10 @@ namespace TerraStorage.Systems
             int entityId = reader.ReadInt32();
             int slot = reader.ReadInt32();
 
+            // Fixed-size array, index off the wire — see HandleSyncStationInsert.
+            if (slot < 0 || slot >= CraftingCoreEntity.StationSlotCount)
+                return;
+
             if (Terraria.DataStructures.TileEntity.ByID.TryGetValue(entityId, out var entity)
                 && entity is CraftingCoreEntity cce)
             {
@@ -322,31 +436,26 @@ namespace TerraStorage.Systems
 
         // ─── Storage Item Operations ────────────────────────────────────
 
-        public static void SendDepositItem(Mod mod, List<Guid> diskIds, Item item)
+        public static void SendDepositItem(Mod mod, int terminalEntityId, Item item)
         {
             if (Main.netMode != NetmodeID.MultiplayerClient)
                 return;
 
             var packet = mod.GetPacket();
             packet.Write((byte)PacketType.DepositItem);
-            packet.Write(diskIds.Count);
-            foreach (var id in diskIds)
-                packet.Write(id.ToByteArray());
+            packet.Write(terminalEntityId);
             ItemIO.Send(item, packet, true);
             packet.Send();
         }
 
-        public static void SendWithdrawItem(Mod mod, List<Guid> diskIds, int itemType, int count, int prefix, bool shift = false)
+        public static void SendWithdrawItem(Mod mod, int terminalEntityId, int itemType, int count, int prefix, bool shift = false)
         {
             if (Main.netMode != NetmodeID.MultiplayerClient)
                 return;
 
             var packet = mod.GetPacket();
             packet.Write((byte)PacketType.WithdrawItem);
-            packet.Write(Main.myPlayer);
-            packet.Write(diskIds.Count);
-            foreach (var id in diskIds)
-                packet.Write(id.ToByteArray());
+            packet.Write(terminalEntityId);
             packet.Write(itemType);
             packet.Write(count);
             packet.Write(prefix);
@@ -354,33 +463,27 @@ namespace TerraStorage.Systems
             packet.Send();
         }
 
-        public static void SendWithdrawItemByModData(Mod mod, List<Guid> diskIds, TagCompound modData, bool shift = false)
+        public static void SendWithdrawItemByModData(Mod mod, int terminalEntityId, TagCompound modData, bool shift = false)
         {
             if (Main.netMode != NetmodeID.MultiplayerClient)
                 return;
 
             var packet = mod.GetPacket();
             packet.Write((byte)PacketType.WithdrawItemByModData);
-            packet.Write(Main.myPlayer);
-            packet.Write(diskIds.Count);
-            foreach (var id in diskIds)
-                packet.Write(id.ToByteArray());
+            packet.Write(terminalEntityId);
             TagIO.Write(modData, packet);
             packet.Write(shift);
             packet.Send();
         }
 
-        public static void SendWithdrawItemByFullItemTag(Mod mod, List<Guid> diskIds, TagCompound fullItemTag, bool shift = false)
+        public static void SendWithdrawItemByFullItemTag(Mod mod, int terminalEntityId, TagCompound fullItemTag, bool shift = false)
         {
             if (Main.netMode != NetmodeID.MultiplayerClient)
                 return;
 
             var packet = mod.GetPacket();
             packet.Write((byte)PacketType.WithdrawItemByFullItemTag);
-            packet.Write(Main.myPlayer);
-            packet.Write(diskIds.Count);
-            foreach (var id in diskIds)
-                packet.Write(id.ToByteArray());
+            packet.Write(terminalEntityId);
             TagIO.Write(fullItemTag, packet);
             packet.Write(shift);
             packet.Send();
@@ -388,77 +491,98 @@ namespace TerraStorage.Systems
 
         private static void HandleWithdrawItemByFullItemTag(Mod mod, BinaryReader reader, int whoAmI)
         {
-            int playerIndex = reader.ReadInt32();
-            int diskCount = reader.ReadInt32();
-            var diskIds = ReadGuidList(reader, diskCount);
+            int terminalEntityId = reader.ReadInt32();
             var fullItemTag = TagIO.Read(reader);
             bool shift = reader.ReadBoolean();
 
-            if (Main.netMode == NetmodeID.Server)
-            {
-                DBG($"HandleWithdrawItemByFullItemTag: from={whoAmI} player={playerIndex} disks=[{string.Join(", ", diskIds.Select(g => g.ToString()[..8]))}]");
-                StorageWorldSystem.Instance.BeginModificationTracking();
-                var extracted = StorageWorldSystem.Instance.ExtractItemWithFullItemTag(diskIds, fullItemTag);
-                EndTrackingAndRespond(mod, whoAmI, !extracted.IsAir, diskIds);
-                DBG($"  ExtractItemWithFullItemTag result: type={extracted.type} stack={extracted.stack} isAir={extracted.IsAir}");
+            if (Main.netMode != NetmodeID.Server)
+                return;
 
-                var resultPacket = mod.GetPacket();
-                resultPacket.Write((byte)PacketType.WithdrawItemResult);
-                ItemIO.Send(extracted, resultPacket, true);
-                resultPacket.Write(shift);
-                resultPacket.Send(playerIndex, -1);
-            }
+            if (!TryResolveOperableTerminal(mod, whoAmI, terminalEntityId, out _, out var diskIds))
+                return;
+
+            DBG($"HandleWithdrawItemByFullItemTag: from={whoAmI} terminal={terminalEntityId} disks=[{string.Join(", ", diskIds.Select(g => g.ToString()[..8]))}]");
+            StorageWorldSystem.Instance.BeginModificationTracking(diskIds);
+            var extracted = StorageWorldSystem.Instance.ExtractItemWithFullItemTag(diskIds, fullItemTag);
+
+            var withdrawFailure = extracted.IsAir
+                ? StorageOperationFailure.NothingWithdrawn
+                : StorageOperationFailure.None;
+            EndTrackingAndRespond(mod, whoAmI, withdrawFailure, diskIds);
+            DBG($"  ExtractItemWithFullItemTag result: type={extracted.type} stack={extracted.stack} isAir={extracted.IsAir}");
+
+            var resultPacket = mod.GetPacket();
+            resultPacket.Write((byte)PacketType.WithdrawItemResult);
+            ItemIO.Send(extracted, resultPacket, true);
+            resultPacket.Write(shift);
+            resultPacket.Send(whoAmI);
         }
 
         private static void HandleWithdrawItemByModData(Mod mod, BinaryReader reader, int whoAmI)
         {
-            int playerIndex = reader.ReadInt32();
-            int diskCount = reader.ReadInt32();
-            var diskIds = ReadGuidList(reader, diskCount);
+            int terminalEntityId = reader.ReadInt32();
             var modData = TagIO.Read(reader);
             bool shift = reader.ReadBoolean();
 
-            if (Main.netMode == NetmodeID.Server)
-            {
-                DBG($"HandleWithdrawItemByModData: from={whoAmI} player={playerIndex} disks=[{string.Join(", ", diskIds.Select(g => g.ToString()[..8]))}]");
-                StorageWorldSystem.Instance.BeginModificationTracking();
-                var extracted = StorageWorldSystem.Instance.ExtractItemWithModData(diskIds, modData);
-                var modified = StorageWorldSystem.Instance.EndModificationTracking();
-                DBG($"  ExtractItemWithModData result: type={extracted.type} stack={extracted.stack} isAir={extracted.IsAir}");
+            if (Main.netMode != NetmodeID.Server)
+                return;
 
-                var resultPacket = mod.GetPacket();
-                resultPacket.Write((byte)PacketType.WithdrawItemResult);
-                ItemIO.Send(extracted, resultPacket, true);
-                resultPacket.Write(shift);
-                resultPacket.Send(playerIndex, -1);
+            if (!TryResolveOperableTerminal(mod, whoAmI, terminalEntityId, out _, out var diskIds))
+                return;
 
-                EndTrackingAndRespond(mod, whoAmI, !extracted.IsAir, diskIds);
-            }
+            DBG($"HandleWithdrawItemByModData: from={whoAmI} terminal={terminalEntityId} disks=[{string.Join(", ", diskIds.Select(g => g.ToString()[..8]))}]");
+            StorageWorldSystem.Instance.BeginModificationTracking(diskIds);
+            var extracted = StorageWorldSystem.Instance.ExtractItemWithModData(diskIds, modData);
+            DBG($"  ExtractItemWithModData result: type={extracted.type} stack={extracted.stack} isAir={extracted.IsAir}");
+
+            var resultPacket = mod.GetPacket();
+            resultPacket.Write((byte)PacketType.WithdrawItemResult);
+            ItemIO.Send(extracted, resultPacket, true);
+            resultPacket.Write(shift);
+            resultPacket.Send(whoAmI);
+
+            var withdrawFailure = extracted.IsAir
+                ? StorageOperationFailure.NothingWithdrawn
+                : StorageOperationFailure.None;
+            EndTrackingAndRespond(mod, whoAmI, withdrawFailure, diskIds);
         }
 
         private static void HandleDepositItem(Mod mod, BinaryReader reader, int whoAmI)
         {
-            int count = reader.ReadInt32();
-            var diskIds = ReadGuidList(reader, count);
+            int terminalEntityId = reader.ReadInt32();
             var item = ItemIO.Receive(reader, true);
 
-            if (Main.netMode == NetmodeID.Server)
+            if (Main.netMode != NetmodeID.Server)
+                return;
+
+            // The client emptied the slot or the cursor before sending (StoragePlayerSystem's
+            // shift-click deposit and TerminalUIState's cursor deposit both do), so a refusal that
+            // kept the item would destroy it. Returned before the reason is sent, because
+            // TryResolveOperableTerminal has already spoken by the time it returns false.
+            if (!TryResolveOperableTerminal(mod, whoAmI, terminalEntityId, out _, out var diskIds))
             {
-                DBG($"HandleDepositItem: from={whoAmI} item={item.type}x{item.stack} disks=[{string.Join(", ", diskIds.Select(g => g.ToString()[..8]))}]");
-                StorageWorldSystem.Instance.BeginModificationTracking();
-                int leftover = StorageWorldSystem.Instance.InsertItem(diskIds, item);
-                DBG($"  InsertItem result: leftover={leftover}");
-                if (leftover > 0)
-                {
-                    item.stack = leftover;
-                    var resultPacket = mod.GetPacket();
-                    resultPacket.Write((byte)PacketType.WithdrawItemResult);
-                    ItemIO.Send(item, resultPacket, true);
-                    resultPacket.Write(true); // shift=true: route into inventory, fall back to cursor
-                    resultPacket.Send(whoAmI);
-                }
-                EndTrackingAndRespond(mod, whoAmI, leftover < item.stack, diskIds);
+                SendReturnItemToClient(mod, whoAmI, item);
+                return;
             }
+
+            DBG($"HandleDepositItem: from={whoAmI} item={item.type}x{item.stack} terminal={terminalEntityId}");
+            StorageWorldSystem.Instance.BeginModificationTracking(diskIds);
+            int leftover = StorageWorldSystem.Instance.InsertItem(diskIds, item);
+            DBG($"  InsertItem result: leftover={leftover}");
+
+            // Built before item.stack is overwritten with the leftover below.
+            var outcome = new DepositOutcome(item.stack, leftover);
+
+            if (outcome.NeedsReturn)
+            {
+                item.stack = outcome.Leftover;
+                SendReturnItemToClient(mod, whoAmI, item);
+            }
+
+            var depositFailure = outcome.AnyDeposited
+                ? StorageOperationFailure.None
+                : StorageOperationFailure.NothingDeposited;
+            EndTrackingAndRespond(mod, whoAmI, depositFailure, diskIds);
         }
 
         // Client → server: deposit one item into the network of the Terminal at terminalPos.
@@ -492,15 +616,14 @@ namespace TerraStorage.Systems
             if (!TileEntity.ByPosition.TryGetValue(terminalPos, out var entity) || entity is not TerminalEntity)
             {
                 SendReturnItemToClient(mod, whoAmI, item);
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.NoTerminalFound);
                 return;
             }
 
-            var player = Main.player[whoAmI];
-            float dx = player.Center.X - (terminalPos.X * 16f + 24f);
-            float dy = player.Center.Y - (terminalPos.Y * 16f + 24f);
-            if (dx * dx + dy * dy > 240f * 240f) // 15 tiles in pixels
+            if (!SenderIsAtBlock(whoAmI, terminalPos))
             {
                 SendReturnItemToClient(mod, whoAmI, item);
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.NoStorageInRange);
                 return;
             }
 
@@ -508,62 +631,81 @@ namespace TerraStorage.Systems
             if (diskIds.Count == 0)
             {
                 SendReturnItemToClient(mod, whoAmI, item);
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.NoStorageConnected);
                 return;
             }
 
-            StorageWorldSystem.Instance.BeginModificationTracking();
+            StorageWorldSystem.Instance.BeginModificationTracking(diskIds);
             int leftover = StorageWorldSystem.Instance.InsertItem(diskIds, item);
-            if (leftover > 0)
+
+            // Built before item.stack becomes the leftover — see HandleDepositItem.
+            var outcome = new DepositOutcome(item.stack, leftover);
+
+            if (outcome.NeedsReturn)
             {
-                item.stack = leftover;
+                item.stack = outcome.Leftover;
                 SendReturnItemToClient(mod, whoAmI, item);
             }
-            EndTrackingAndRespond(mod, whoAmI, leftover < item.stack, diskIds);
+
+            var depositFailure = outcome.AnyDeposited
+                ? StorageOperationFailure.None
+                : StorageOperationFailure.NothingDeposited;
+            EndTrackingAndRespond(mod, whoAmI, depositFailure, diskIds);
         }
 
         // Server → client: return an item to the player's inventory with full fidelity (mod data
         // preserved). Used when a deposit is rejected or only partially accepted. Reuses the
         // WithdrawItemResult route (shift=true) so modded items keep their data, unlike
         // SendGiveItemToClient which only carries type/stack/prefix.
-        private static void SendReturnItemToClient(Mod mod, int toClient, Item item)
+        private static void SendReturnItemToClient(Mod mod, int toClient, Item item,
+            bool routeToInventory = true)
         {
             var packet = mod.GetPacket();
             packet.Write((byte)PacketType.WithdrawItemResult);
             ItemIO.Send(item, packet, true);
-            packet.Write(true); // shift=true: route into inventory, fall back to cursor
+            // shift=true routes into the inventory and falls back to the cursor; false puts it
+            // straight on the cursor, which is what a plain click on a Drive Bay slot expects.
+            packet.Write(routeToInventory);
             packet.Send(toClient);
         }
 
         private static void HandleWithdrawItem(Mod mod, BinaryReader reader, int whoAmI)
         {
-            int playerIndex = reader.ReadInt32();
-            int diskCount = reader.ReadInt32();
-            var diskIds = ReadGuidList(reader, diskCount);
+            int terminalEntityId = reader.ReadInt32();
             int itemType = reader.ReadInt32();
             int count = reader.ReadInt32();
             int prefix = reader.ReadInt32();
             bool shift = reader.ReadBoolean();
 
-            if (Main.netMode == NetmodeID.Server)
-            {
-                DBG($"HandleWithdrawItem: from={whoAmI} player={playerIndex} type={itemType} count={count} prefix={prefix} disks=[{string.Join(", ", diskIds.Select(g => g.ToString()[..8]))}]");
-                StorageWorldSystem.Instance.BeginModificationTracking();
-                var extracted = StorageWorldSystem.Instance.ExtractItem(diskIds, itemType, count, prefix);
-                DBG($"  ExtractItem result: type={extracted.type} stack={extracted.stack} isAir={extracted.IsAir}");
+            if (Main.netMode != NetmodeID.Server)
+                return;
 
-                // Send the extracted item back to the requesting client to place on cursor or in inventory
-                var resultPacket = mod.GetPacket();
-                resultPacket.Write((byte)PacketType.WithdrawItemResult);
-                ItemIO.Send(extracted, resultPacket, true);
-                resultPacket.Write(shift);
-                resultPacket.Send(playerIndex, -1);
+            if (!TryResolveOperableTerminal(mod, whoAmI, terminalEntityId, out _, out var diskIds))
+                return;
 
-                EndTrackingAndRespond(mod, whoAmI, !extracted.IsAir, diskIds);
-            }
+            DBG($"HandleWithdrawItem: from={whoAmI} type={itemType} count={count} prefix={prefix} terminal={terminalEntityId}");
+            StorageWorldSystem.Instance.BeginModificationTracking(diskIds);
+            var extracted = StorageWorldSystem.Instance.ExtractItem(diskIds, itemType, count, prefix);
+            DBG($"  ExtractItem result: type={extracted.type} stack={extracted.stack} isAir={extracted.IsAir}");
+
+            // Send the extracted item back to the requesting client to place on cursor or in inventory
+            var resultPacket = mod.GetPacket();
+            resultPacket.Write((byte)PacketType.WithdrawItemResult);
+            ItemIO.Send(extracted, resultPacket, true);
+            resultPacket.Write(shift);
+            resultPacket.Send(whoAmI);
+
+            var withdrawFailure = extracted.IsAir
+                ? StorageOperationFailure.NothingWithdrawn
+                : StorageOperationFailure.None;
+            EndTrackingAndRespond(mod, whoAmI, withdrawFailure, diskIds);
         }
 
         private static void HandleWithdrawItemResult(BinaryReader reader)
         {
+            // Server → client only. Main.LocalPlayer on a dedicated server is the dummy player.
+            if (Main.netMode != NetmodeID.MultiplayerClient) return;
+
             var item = ItemIO.Receive(reader, true);
             bool shift = reader.ReadBoolean();
 
@@ -599,28 +741,18 @@ namespace TerraStorage.Systems
 
         // ─── Crafting ───────────────────────────────────────────────────
 
-        public static void SendCraftRequest(Mod mod, List<Guid> diskIds, int recipeItemType,
-            int craftAmount, HashSet<int> stations, HashSet<CraftingCondition> conditions, bool cleanCraft, bool craftToInventory,
-            int recipeIndex)
+        public static void SendCraftRequest(Mod mod, int terminalEntityId, int recipeItemType,
+            int craftAmount, bool cleanCraft, bool craftToInventory, int recipeIndex)
         {
             if (Main.netMode != NetmodeID.MultiplayerClient)
                 return;
 
             var packet = mod.GetPacket();
             packet.Write((byte)PacketType.CraftRequest);
-            packet.Write(Main.myPlayer);
-            packet.Write(diskIds.Count);
-            foreach (var id in diskIds)
-                packet.Write(id.ToByteArray());
+            packet.Write(terminalEntityId);
             packet.Write(recipeItemType);
             packet.Write(recipeIndex);
             packet.Write(craftAmount);
-            packet.Write(stations.Count);
-            foreach (int s in stations)
-                packet.Write(s);
-            packet.Write(conditions.Count);
-            foreach (var c in conditions)
-                packet.Write((byte)c);
             packet.Write(cleanCraft);
             packet.Write(craftToInventory);
             packet.Send();
@@ -628,79 +760,80 @@ namespace TerraStorage.Systems
 
         private static void HandleCraftRequest(Mod mod, BinaryReader reader, int whoAmI)
         {
-            int playerIndex = reader.ReadInt32();
-            int diskCount = reader.ReadInt32();
-            var diskIds = ReadGuidList(reader, diskCount);
+            int terminalEntityId = reader.ReadInt32();
             int recipeItemType = reader.ReadInt32();
             int recipeIndex = reader.ReadInt32();
             int craftAmount = reader.ReadInt32();
-            int stationCount = reader.ReadInt32();
-            var stations = new HashSet<int>();
-            for (int i = 0; i < stationCount; i++)
-                stations.Add(reader.ReadInt32());
-            int condCount = reader.ReadInt32();
-            var conditions = new HashSet<CraftingCondition>();
-            for (int i = 0; i < condCount; i++)
-                conditions.Add((CraftingCondition)reader.ReadByte());
             bool cleanCraft = reader.ReadBoolean();
             bool craftToInventory = reader.ReadBoolean();
 
-            if (Main.netMode == NetmodeID.Server)
+            if (Main.netMode != NetmodeID.Server)
+                return;
+
+            if (!TryResolveOperableTerminal(mod, whoAmI, terminalEntityId, out var terminal, out var diskIds))
+                return;
+
+            // Stations and conditions used to travel on this packet, which let a client claim any
+            // crafting station in the game and spend the network's materials on a recipe it has no
+            // station for. They come from the Crafting Cores around the named Terminal, which is
+            // something only the server can establish — the same reason the disk list is gone.
+            var (stations, conditions) = StorageNetwork.GetAllStationsAndConditions(terminal.Position);
+
+            // Server re-resolves so existing stock of the target item is ignored — the client
+            // explicitly requested new crafts. When the client locked a specific recipe variant
+            // (recipeIndex >= 0), force exactly that recipe; otherwise auto-select the best one.
+            var plan = recipeIndex >= 0 && recipeIndex < Recipe.numRecipes
+                ? RecipeResolver.ResolveRecipe(Main.recipe[recipeIndex], craftAmount, diskIds, stations, conditions)
+                : RecipeResolver.ResolveForceCraft(recipeItemType, craftAmount, diskIds, stations, conditions);
+            StorageWorldSystem.Instance.BeginModificationTracking(diskIds);
+
+            // Pre-check: block the craft if neither storage nor player inventory has room.
+            // This prevents consuming ingredients with nowhere to put the result. The verdict
+            // comes from GetCraftFailure so the panel's copy of these guards cannot drift.
+            bool planIsFeasible = plan != null && plan.IsFeasible;
+
+            var resultPreview = new Item();
+            if (planIsFeasible)
             {
-                // Server re-resolves so existing stock of the target item is ignored — the client
-                // explicitly requested new crafts. When the client locked a specific recipe variant
-                // (recipeIndex >= 0), force exactly that recipe; otherwise auto-select the best one.
-                var plan = recipeIndex >= 0 && recipeIndex < Recipe.numRecipes
-                    ? RecipeResolver.ResolveRecipe(Main.recipe[recipeIndex], craftAmount, diskIds, stations, conditions)
-                    : RecipeResolver.ResolveForceCraft(recipeItemType, craftAmount, diskIds, stations, conditions);
-                StorageWorldSystem.Instance.BeginModificationTracking();
-                bool success = false;
-                if (plan != null && plan.IsFeasible)
+                resultPreview.SetDefaults(plan.FinalItemType);
+                resultPreview.stack = plan.FinalItemCount;
+            }
+
+            var player = Main.player[whoAmI];
+            bool playerHasRoomForResult = planIsFeasible && PlayerHasRoomFor(player, resultPreview);
+            bool storageHasRoomForResult = planIsFeasible && !craftToInventory
+                && StorageWorldSystem.Instance.HasRoomFor(diskIds, resultPreview);
+
+            var craftFailure = StorageOperationFailures.GetCraftFailure(planIsFeasible,
+                craftToInventory, playerHasRoomForResult, storageHasRoomForResult);
+
+            if (StorageOperationFailures.IsSuccess(craftFailure))
+            {
+                var result = RecipeResolver.ExecutePlan(plan, diskIds, cleanCraft);
+                if (result.IsAir)
                 {
-                    // Pre-check: block the craft if neither storage nor player inventory
-                    // has room. This prevents consuming ingredients with nowhere to put the result.
-                    var resultPreview = new Item();
-                    resultPreview.SetDefaults(plan.FinalItemType);
-                    resultPreview.stack = plan.FinalItemCount;
-
-                    var player = Main.player[whoAmI];
-                    bool canCraft;
-                    if (craftToInventory)
-                        canCraft = PlayerHasRoomFor(player, resultPreview);
-                    else
+                    craftFailure = StorageOperationFailure.CraftCostingNoLongerHolds;
+                }
+                else if (craftToInventory)
+                {
+                    // Send entire result to client's inventory.
+                    SendGiveItemToClient(mod, whoAmI, result);
+                }
+                else
+                {
+                    int leftover = StorageWorldSystem.Instance.InsertItem(diskIds, result);
+                    if (leftover > 0)
                     {
-                        bool storageHasRoom = StorageWorldSystem.Instance.HasRoomFor(diskIds, resultPreview);
-                        canCraft = storageHasRoom || PlayerHasRoomFor(player, resultPreview);
-                    }
-
-                    if (canCraft)
-                    {
-                        var result = RecipeResolver.ExecutePlan(plan, diskIds, cleanCraft);
-                        if (!result.IsAir)
-                        {
-                            if (craftToInventory)
-                            {
-                                // Send entire result to client's inventory.
-                                SendGiveItemToClient(mod, whoAmI, result);
-                            }
-                            else
-                            {
-                                int leftover = StorageWorldSystem.Instance.InsertItem(diskIds, result);
-                                if (leftover > 0)
-                                {
-                                    // Storage is full — send the remainder to the client so it
-                                    // can add it to its own inventory directly. Calling GetItem
-                                    // server-side does not reliably sync to the client.
-                                    result.stack = leftover;
-                                    SendGiveItemToClient(mod, whoAmI, result);
-                                }
-                            }
-                            success = true;
-                        }
+                        // Storage is full — send the remainder to the client so it
+                        // can add it to its own inventory directly. Calling GetItem
+                        // server-side does not reliably sync to the client.
+                        result.stack = leftover;
+                        SendGiveItemToClient(mod, whoAmI, result);
                     }
                 }
-                EndTrackingAndRespond(mod, whoAmI, success, diskIds);
             }
+
+            EndTrackingAndRespond(mod, whoAmI, craftFailure, diskIds);
         }
 
         // ─── DiskData Sync ──────────────────────────────────────────────
@@ -719,60 +852,51 @@ namespace TerraStorage.Systems
             catch { /* never let logging crash packet handling */ }
         }
 
-        public static void SendRequestDiskData(Mod mod, List<Guid> diskIds)
+        // The packet names the block whose disks are wanted, not the disk GUIDs. A Drive Bay asks
+        // about its own disks; a Terminal asks about its network's. Either way the server serves
+        // only what that block actually holds, so a GUID read off someone else's bay traffic cannot
+        // be used to dump a disk sitting in a chest.
+        public static void SendRequestDiskData(Mod mod, int blockEntityId)
         {
             if (Main.netMode != NetmodeID.MultiplayerClient)
                 return;
 
-            DBG($"SendRequestDiskData: sending {diskIds.Count} ids: {string.Join(", ", diskIds.Select(g => g.ToString()[..8]))}");
+            DBG($"SendRequestDiskData: asking about block entity {blockEntityId}");
 
             var packet = mod.GetPacket();
             packet.Write((byte)PacketType.RequestDiskData);
-            packet.Write(diskIds.Count);
-            foreach (var id in diskIds)
-                packet.Write(id.ToByteArray());
+            packet.Write(blockEntityId);
             packet.Send();
         }
 
+        // Deliberately not range-checked. DriveBayEntity.NetReceive asks for every bay it is told
+        // about, and a bay need not be anywhere near a Terminal — gating this on proximity would
+        // leave distant bays' status lights blank.
         private static void HandleRequestDiskData(Mod mod, BinaryReader reader, int whoAmI)
         {
-            int count = reader.ReadInt32();
-            var diskIds = ReadGuidList(reader, count);
+            int blockEntityId = reader.ReadInt32();
 
-            DBG($"HandleRequestDiskData: received {count} ids from whoAmI={whoAmI}: {string.Join(", ", diskIds.Select(g => g.ToString()[..8]))}");
-
-            if (Main.netMode == NetmodeID.Server)
-            {
-                var sys = StorageWorldSystem.Instance;
-                DBG($"  allDiskData before ensure: [{string.Join(", ", sys.GetAllDiskData().Select(d => d.DiskId.ToString()[..8]))}]");
-                EnsureDisksRegistered(diskIds);
-                DBG($"  allDiskData after ensure:  [{string.Join(", ", sys.GetAllDiskData().Select(d => d.DiskId.ToString()[..8]))}]");
-                SendDiskDataToClient(mod, diskIds, whoAmI);
-            }
-        }
-
-        // Scans all Drive Bay entities and registers any disks not yet in StorageWorldSystem.
-        // Only runs on the server and only when there are missing IDs, so overhead is minimal.
-        private static void EnsureDisksRegistered(List<Guid> diskIds)
-        {
-            var sys = StorageWorldSystem.Instance;
-            if (diskIds.TrueForAll(id => sys.HasDiskData(id)))
-            {
-                DBG($"  EnsureDisksRegistered: all {diskIds.Count} already registered, skip scan");
+            if (Main.netMode != NetmodeID.Server)
                 return;
-            }
 
-            int bayCount = 0;
-            foreach (var kvp in Terraria.DataStructures.TileEntity.ByID)
+            if (!TileEntity.ByID.TryGetValue(blockEntityId, out var entity))
+                return;
+
+            // GetInsertedDiskIds registers any disk missing from world storage as a side effect,
+            // which is what the old EnsureDisksRegistered sweep over every bay in the world existed
+            // to do. Naming the block turns that sweep into one lookup.
+            List<Guid> diskIds = entity switch
             {
-                if (kvp.Value is DriveBayEntity sbe)
-                {
-                    var ids = sbe.GetInsertedDiskIds(); // registers disks as a side effect
-                    DBG($"  EnsureDisksRegistered: bay {kvp.Key} has {ids.Count} disks: [{string.Join(", ", ids.Select(g => g.ToString()[..8]))}]");
-                    bayCount++;
-                }
-            }
-            DBG($"  EnsureDisksRegistered: scanned {bayCount} bays");
+                DriveBayEntity bay => bay.GetInsertedDiskIds(),
+                TerminalEntity terminal => StorageNetwork.GetAllConnectedDiskIds(terminal.Position),
+                _ => null,
+            };
+
+            if (diskIds == null || diskIds.Count == 0)
+                return;
+
+            DBG($"HandleRequestDiskData: block {blockEntityId} for whoAmI={whoAmI} holds {diskIds.Count} disks");
+            SendDiskDataToClient(mod, diskIds, whoAmI);
         }
 
         // ─── Chunked Disk Packet Helper ────────────────────────────────
@@ -841,12 +965,25 @@ namespace TerraStorage.Systems
 
         private static void HandleSyncDiskDataChunked(BinaryReader reader)
         {
+            if (Main.netMode != NetmodeID.MultiplayerClient) return;
+
             var diskId = new Guid(reader.ReadBytes(16));
             int seqNum = reader.ReadInt32();
             ushort chunkIndex = reader.ReadUInt16();
             ushort totalChunks = reader.ReadUInt16();
             int dataLength = reader.ReadInt32();
+
+            // ReadBytes allocates the whole length before reading it, so this is the same
+            // allocate-from-a-lie shape as a list capacity. The sender writes 50,000-byte chunks.
+            if (!WireCount.FitsInOnePacket(dataLength, 1))
+                return;
+
             byte[] data = reader.ReadBytes(dataLength);
+
+            // Checked before the buffer below is sized from totalChunks, not after: the same
+            // check-before-you-allocate rule the count bounds exist for.
+            if (totalChunks == 0 || chunkIndex >= totalChunks)
+                return;
 
             if (!_chunkBuffers.TryGetValue(diskId, out var buf) || buf.SeqNum != seqNum)
             {
@@ -860,6 +997,15 @@ namespace TerraStorage.Systems
                 _chunkBuffers[diskId] = buf;
             }
 
+            // The buffer may have been sized by an earlier packet claiming a different total.
+            if (chunkIndex >= buf.TotalChunks)
+                return;
+
+            // Counting a chunk that already arrived would let a repeat stand in for one still
+            // missing, and the reassembly below would then read a null chunk.
+            if (buf.Chunks[chunkIndex] != null)
+                return;
+
             buf.Chunks[chunkIndex] = data;
             buf.Received++;
 
@@ -872,6 +1018,11 @@ namespace TerraStorage.Systems
 
                 using var br = new BinaryReader(ms);
                 var diskData = DiskData.ReadNet(br);
+                if (diskData == null)
+                {
+                    _chunkBuffers.Remove(diskId);
+                    return;
+                }
 
                 var sys = StorageWorldSystem.Instance;
                 sys.ApplyDiskDataFromNetwork(diskData);
@@ -932,6 +1083,11 @@ namespace TerraStorage.Systems
 
         private static void HandleSyncDiskData(BinaryReader reader)
         {
+            // Server-authoritative state arriving from a client is not a correction, it is a forgery.
+            // ApplyDiskDataFromNetwork guards itself, but SetDiskSeqNum and RefreshAllDriveBays below
+            // would still run for whatever GUIDs the packet named.
+            if (Main.netMode != NetmodeID.MultiplayerClient) return;
+
             try
             {
                 int count = reader.ReadInt32();
@@ -940,6 +1096,10 @@ namespace TerraStorage.Systems
                 for (int i = 0; i < count; i++)
                 {
                     var data = DiskData.ReadNet(reader);
+                    // Break rather than return: the disks already applied still need the refresh.
+                    if (data == null)
+                        break;
+
                     sys.ApplyDiskDataFromNetwork(data);
                     sys.SetDiskSeqNum(data.DiskId, seqNum);
                 }
@@ -965,6 +1125,9 @@ namespace TerraStorage.Systems
 
         private static void HandleSyncDriveBay(Mod mod, BinaryReader reader, int whoAmI)
         {
+            // Server → client only. Without this a client could rewrite all 40 slots of any bay.
+            if (Main.netMode != NetmodeID.MultiplayerClient) return;
+
             int entityId = reader.ReadInt32();
             if (Terraria.DataStructures.TileEntity.ByID.TryGetValue(entityId, out var entity)
                 && entity is DriveBayEntity sbe)
@@ -981,14 +1144,13 @@ namespace TerraStorage.Systems
         // Client requests the server to archive the disk at the given inventory slot.
         // The GUID is included so the server can look it up in StorageWorldSystem without
         // relying on a fully-synced copy of the player's inventory mod data.
-        public static void SendArchiveDiskRequest(Mod mod, int playerIndex, int slot, Guid diskId)
+        public static void SendArchiveDiskRequest(Mod mod, int slot, Guid diskId)
         {
             if (Main.netMode != NetmodeID.MultiplayerClient)
                 return;
 
             var packet = mod.GetPacket();
             packet.Write((byte)PacketType.ArchiveDiskRequest);
-            packet.Write(playerIndex);
             packet.Write(slot);
             packet.Write(diskId.ToByteArray());
             packet.Send();
@@ -996,20 +1158,27 @@ namespace TerraStorage.Systems
 
         private static void HandleArchiveDiskRequest(Mod mod, BinaryReader reader, int whoAmI)
         {
-            int playerIndex = reader.ReadInt32();
             int slot = reader.ReadInt32();
             var diskId = new Guid(reader.ReadBytes(16));
 
             if (Main.netMode != NetmodeID.Server)
                 return;
 
-            var player = Main.player[playerIndex];
-            if (slot < 0 || slot >= player.inventory.Length)
+            // whoAmI, never an index off the wire: the sender is the only player whose inventory
+            // this may read, and an out-of-range value would index Netplay.Clients and throw.
+            // The sender's own inventory slot is the authorization here — no network is named, so
+            // there is nothing else to check. The GUID must be the one on the disk actually held in
+            // that slot: archiving whatever GUID the packet named would hand the sender any disk's
+            // contents and erase it for everyone else.
+            var player = Main.player[whoAmI];
+            if (slot < 0 || slot >= player.inventory.Length
+                || player.inventory[slot] is not { IsAir: false } invItem
+                || invItem.ModItem is not StorageDiskBase disk
+                || disk.DiskId != diskId)
+            {
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.DiskNotInSlot);
                 return;
-
-            var invItem = player.inventory[slot];
-            if (invItem == null || invItem.IsAir || invItem.ModItem is not StorageDiskBase disk)
-                return;
+            }
 
             // Extract items from world storage and embed them in the disk item.
             var items = StorageWorldSystem.Instance.ArchiveDisk(diskId);
@@ -1025,7 +1194,7 @@ namespace TerraStorage.Systems
             packet.Write((byte)PacketType.ArchiveDiskResult);
             packet.Write(slot);
             ItemIO.Send(invItem, packet, true);
-            packet.Send(playerIndex);
+            packet.Send(whoAmI);
         }
 
         public static void SendSyncRemoveDiskData(Mod mod, Guid diskId)
@@ -1070,7 +1239,7 @@ namespace TerraStorage.Systems
             packet.Send();
         }
 
-        private static void HandleRestoreDiskRequest(Mod mod, BinaryReader reader)
+        private static void HandleRestoreDiskRequest(Mod mod, BinaryReader reader, int whoAmI)
         {
             var oldGuid      = new Guid(reader.ReadBytes(16));
             var repDiskOldId = new Guid(reader.ReadBytes(16));
@@ -1080,6 +1249,32 @@ namespace TerraStorage.Systems
 
             var sys = StorageWorldSystem.Instance;
             if (sys == null) return;
+
+            // RemapDiskData moves a disk's entire contents to a caller-chosen GUID, so this has to
+            // establish two things the packet cannot: that the sender really holds the replacement
+            // disk, and that the disk being recovered is genuinely lost. Without the second check a
+            // player holding any blank disk could name someone else's live disk and take it.
+            if (!PlayerHoldsDisk(whoAmI, repDiskOldId))
+            {
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.DiskRecoveryRefused);
+                return;
+            }
+
+            // The recovery list shows every non-empty disk, not only lost ones, so a player may
+            // legitimately pick one whose physical disk still exists — as long as it is their own.
+            // Remapping a GUID that lives in someone else's inventory or in a Drive Bay is the
+            // theft case, and that is what this refuses.
+            if (IsDiskGuidInUse(oldGuid) && !PlayerHoldsDisk(whoAmI, oldGuid))
+            {
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.DiskRecoveryRefused);
+                return;
+            }
+
+            if (newId == Guid.Empty || sys.GetDiskData(newId) != null)
+            {
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.DiskRecoveryRefused);
+                return;
+            }
 
             // Clean up the replacement disk's old entry if empty.
             if (repDiskOldId != Guid.Empty)
@@ -1102,75 +1297,87 @@ namespace TerraStorage.Systems
         // ─── Disk Upgrade ───────────────────────────────────────────────
 
         // Client asks the server to perform a disk tier upgrade in the given Drive Bay slot.
-        public static void SendUpgradeDiskRequest(Mod mod, int entityId, int slotIdx, Guid diskId,
-            System.Collections.Generic.List<Guid> diskIds, int optionIdx,
-            System.Collections.Generic.HashSet<int> stations,
-            System.Collections.Generic.HashSet<CraftingCondition> conditions)
+        public static void SendUpgradeDiskRequest(Mod mod, int terminalEntityId, int bayEntityId,
+            int slotIdx, Guid diskId, int optionIdx)
         {
             if (Main.netMode != NetmodeID.MultiplayerClient) return;
             var packet = mod.GetPacket();
             packet.Write((byte)PacketType.UpgradeDiskRequest);
-            packet.Write(entityId);
+            packet.Write(terminalEntityId);
+            packet.Write(bayEntityId);
             packet.Write(slotIdx);
             packet.Write(diskId.ToByteArray());
-            packet.Write(diskIds.Count);
-            foreach (var id in diskIds) packet.Write(id.ToByteArray());
             packet.Write(optionIdx);
-            packet.Write(stations.Count);
-            foreach (int s in stations) packet.Write(s);
-            packet.Write(conditions.Count);
-            foreach (var c in conditions) packet.Write((byte)c);
             packet.Send();
         }
 
-        private static void HandleUpgradeDiskRequest(Mod mod, BinaryReader reader)
+        private static void HandleUpgradeDiskRequest(Mod mod, BinaryReader reader, int whoAmI)
         {
-            int entityId  = reader.ReadInt32();
-            int slotIdx   = reader.ReadInt32();
-            var diskId    = new Guid(reader.ReadBytes(16));
-            int diskCount = reader.ReadInt32();
-            var diskIds   = ReadGuidList(reader, diskCount);
-            int optionIdx = reader.ReadInt32();
-            int staCnt    = reader.ReadInt32();
-            var stations  = new System.Collections.Generic.HashSet<int>();
-            for (int i = 0; i < staCnt; i++) stations.Add(reader.ReadInt32());
-            int conCnt     = reader.ReadInt32();
-            var conditions = new System.Collections.Generic.HashSet<CraftingCondition>();
-            for (int i = 0; i < conCnt; i++) conditions.Add((CraftingCondition)reader.ReadByte());
+            int terminalEntityId = reader.ReadInt32();
+            int bayEntityId      = reader.ReadInt32();
+            int slotIdx          = reader.ReadInt32();
+            var diskId           = new Guid(reader.ReadBytes(16));
+            int optionIdx        = reader.ReadInt32();
 
             if (Main.netMode != NetmodeID.Server) return;
 
-            if (!Terraria.DataStructures.TileEntity.ByID.TryGetValue(entityId, out var entity)
-                || entity is not DriveBayEntity bay) return;
+            // Upgrading is reached from the Terminal's Disks tab, not from the bay, so the sender is
+            // authorized against the Terminal — which is also the network the panel counted the
+            // materials against. Paying out of the bay's own network, as this used to, spent disks
+            // the player was never shown.
+            if (!TryResolveOperableTerminal(mod, whoAmI, terminalEntityId, out var terminal,
+                out var networkDiskIds))
+                return;
+
+            if (!Terraria.DataStructures.TileEntity.ByID.TryGetValue(bayEntityId, out var entity)
+                || entity is not DriveBayEntity bay)
+            {
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.DiskNotFound);
+                return;
+            }
 
             bay.EnsureSlotsInitialized();
-            if (slotIdx < 0 || slotIdx >= DriveBayEntity.DiskSlotCount) return;
-            if (bay.DiskSlots[slotIdx]?.ModItem is not StorageDiskBase disk) return;
-            if (disk.DiskId != diskId) return;
+            if (slotIdx < 0 || slotIdx >= DriveBayEntity.DiskSlotCount
+                || bay.DiskSlots[slotIdx]?.ModItem is not StorageDiskBase disk
+                || disk.DiskId != diskId)
+            {
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.DiskNotInSlot);
+                return;
+            }
+
+            // The bay has to be one the named Terminal actually reaches, or the Terminal check
+            // above would authorize an upgrade to a disk in someone else's bay across the world.
+            if (!networkDiskIds.Contains(diskId))
+            {
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.DriveBayNotOnNetwork);
+                return;
+            }
 
             var opts = StorageDiskBase.GetUpgradeOptions(disk.Tier);
-            if (opts == null || optionIdx < 0 || optionIdx >= opts.Length) return;
+            if (opts == null || optionIdx < 0 || optionIdx >= opts.Length)
+            {
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.UpgradeUnavailable);
+                return;
+            }
+
             var option   = opts[optionIdx];
             var nextTier = (DiskTier)((int)disk.Tier + 1);
             var sys      = StorageWorldSystem.Instance;
 
-            sys.BeginModificationTracking();
+            // Stations and conditions used to come off the wire too — a client could name any
+            // station in the game and pay for an upgrade it has no Crafting Core for.
+            var (stations, conditions) = StorageNetwork.GetAllStationsAndConditions(terminal.Position);
 
-            // Consume ingredients (craft shortfalls from storage if needed).
-            foreach (var (itemType, need) in option)
+            sys.BeginModificationTracking(networkDiskIds);
+
+            // Affordability is re-checked here, not trusted from the client: the panel's gate lives
+            // on the client only, and storage can change between its check and this packet arriving.
+            // TryConsumeMaterials is all-or-nothing, so a shortfall leaves storage untouched.
+            if (!RecipeResolver.TryConsumeMaterials(networkDiskIds, option, stations, conditions))
             {
-                int have = sys.CountItem(diskIds, itemType);
-                if (have < need)
-                {
-                    var plan = RecipeResolver.Resolve(itemType, need - have, diskIds, stations, conditions);
-                    if (plan != null && plan.IsFeasible)
-                    {
-                        var crafted = RecipeResolver.ExecutePlan(plan, diskIds);
-                        if (!crafted.IsAir)
-                            sys.InsertItem(diskIds, crafted);
-                    }
-                }
-                sys.ExtractItem(diskIds, itemType, need);
+                EndTrackingAndBroadcast(mod);
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.MaterialsNoLongerAvailable);
+                return;
             }
 
             // Build upgraded disk item, carry GUID, upgrade tier in world storage.
@@ -1201,34 +1408,42 @@ namespace TerraStorage.Systems
 
         // ─── Defragment ─────────────────────────────────────────────────
 
-        public static void SendDefragRequest(Mod mod, System.Collections.Generic.List<Guid> diskIds)
+        public static void SendDefragRequest(Mod mod, int terminalEntityId)
         {
             if (Main.netMode != NetmodeID.MultiplayerClient) return;
             var packet = mod.GetPacket();
             packet.Write((byte)PacketType.DefragRequest);
-            packet.Write(diskIds.Count);
-            foreach (var id in diskIds) packet.Write(id.ToByteArray());
+            packet.Write(terminalEntityId);
             packet.Send();
         }
 
-        private static void HandleDefragRequest(Mod mod, BinaryReader reader)
+        // Defragment moves stacks from later disks into earlier ones, so an arbitrary disk list — in
+        // an attacker-chosen order — drained one player's disk into another's. Naming the Terminal
+        // instead settles all three of that: the set is the server's, in the server's order, and it
+        // cannot repeat a disk, so the quadratic sweep and the self-donor case go with it.
+        private static void HandleDefragRequest(Mod mod, BinaryReader reader, int whoAmI)
         {
-            int count = reader.ReadInt32();
-            var diskIds = ReadGuidList(reader, count);
+            int terminalEntityId = reader.ReadInt32();
 
             if (Main.netMode != NetmodeID.Server) return;
 
             var sys = StorageWorldSystem.Instance;
             if (sys == null) return;
 
+            if (!TryResolveOperableTerminal(mod, whoAmI, terminalEntityId, out _, out var diskIds))
+                return;
+
             var modified = sys.Defragment(diskIds);
-            if (modified.Count > 0)
+            if (modified.Count == 0)
             {
-                // Defrag is a rare bulk operation — bump seq nums and broadcast full disk state
-                foreach (var id in modified)
-                    sys.IncrementDiskSeqNum(id);
-                BroadcastDiskData(mod, modified, -1);
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.NothingToDefragment);
+                return;
             }
+
+            // Defrag is a rare bulk operation — bump seq nums and broadcast full disk state
+            foreach (var id in modified)
+                sys.IncrementDiskSeqNum(id);
+            BroadcastDiskData(mod, modified, -1);
         }
 
         // ─── Sync Dispatch ──────────────────────────────────────────────
@@ -1280,35 +1495,225 @@ namespace TerraStorage.Systems
         private static void EndTrackingAndBroadcast(Mod mod)
         {
             var sys = StorageWorldSystem.Instance;
-            var (_, deltas) = sys.EndModificationTrackingWithDeltas();
+            var (_, deltas, needsFullSync) = sys.EndModificationTrackingWithDeltas();
             if (deltas.Count > 0)
                 BroadcastDiskDeltas(mod, deltas);
+
+            BroadcastFullSyncFor(mod, needsFullSync);
+        }
+
+        // A disk that changed outside the operation's snapshot has no delta describing it, so the
+        // whole disk goes out instead. Correct but heavy, which is the point: an under-scoped
+        // BeginModificationTracking costs bandwidth here rather than desynchronising a client.
+        private static void BroadcastFullSyncFor(Mod mod, List<Guid> diskIds)
+        {
+            if (diskIds == null || diskIds.Count == 0)
+                return;
+
+            var sys = StorageWorldSystem.Instance;
+            foreach (var diskId in diskIds)
+            {
+                var disk = sys.GetDiskData(diskId);
+                if (disk != null)
+                    SendDiskPacket(mod, disk, sys.GetDiskSeqNum(diskId));
+            }
         }
 
         // Ends modification tracking, sends OperationResponse to the requester,
         // then broadcasts item-level deltas to all clients.
         // On failure, sends denial + full disk correction packets.
-        private static void EndTrackingAndRespond(Mod mod, int toClient, bool success,
-            List<Guid> requestedDiskIds = null)
+        //
+        // Takes the cause rather than a success flag: success is derived from it here and nowhere
+        // else, so a caller cannot report a denial that names no reason, or a success that does.
+        private static void EndTrackingAndRespond(Mod mod, int toClient,
+            StorageOperationFailure failure, List<Guid> requestedDiskIds = null)
         {
             var sys = StorageWorldSystem.Instance;
-            var (_, deltas) = sys.EndModificationTrackingWithDeltas();
+            var (_, deltas, needsFullSync) = sys.EndModificationTrackingWithDeltas();
+            bool success = StorageOperationFailures.IsSuccess(failure);
 
-            if (success && deltas.Count > 0)
+            if (success && (deltas.Count > 0 || needsFullSync.Count > 0))
             {
-                SendOperationResponse(mod, toClient, true);
+                SendOperationResponse(mod, toClient, StorageOperationFailure.None);
                 BroadcastDiskDeltas(mod, deltas);
+                BroadcastFullSyncFor(mod, needsFullSync);
             }
             else if (!success)
             {
                 // Denied: send failure response + full disk corrections
-                SendOperationResponse(mod, toClient, false, requestedDiskIds);
+                SendOperationResponse(mod, toClient, failure, requestedDiskIds);
             }
             else
             {
                 // Success but no changes (e.g. deposit into a full disk) — still confirm
-                SendOperationResponse(mod, toClient, true);
+                SendOperationResponse(mod, toClient, StorageOperationFailure.None);
             }
+        }
+
+        // A handler that refuses before it begins modification tracking still owes the client an
+        // answer. SendOperationResponse touches no tracking, so these paths respond directly
+        // rather than tearing down a tracker that was never started.
+        private static void RefuseOperation(Mod mod, int toClient, StorageOperationFailure failure)
+        {
+            SendOperationResponse(mod, toClient, failure);
+        }
+
+        // The one encoding of "may this client act on this network". Every storage packet names the
+        // Terminal it was issued from rather than the disks it wants: a disk GUID travels to every
+        // client (StorageDiskBase.NetSend sends all 16 bytes) so naming one proves nothing, while
+        // the network behind a Terminal is something only the server can resolve. All three
+        // refusals answer the sender, and they are the same three HandleDepositItemAtPosition and
+        // HandleQuickStackToStorage have always sent for the same three conditions.
+        private static bool TryResolveOperableTerminal(Mod mod, int whoAmI, int terminalEntityId,
+            out TerminalEntity terminal, out List<Guid> diskIds)
+        {
+            terminal = null;
+            diskIds = null;
+
+            if (!TileEntity.ByID.TryGetValue(terminalEntityId, out var entity)
+                || entity is not TerminalEntity namedTerminal)
+            {
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.NoTerminalFound);
+                return false;
+            }
+
+            if (!SenderMayOperateTerminal(whoAmI, namedTerminal))
+            {
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.NoStorageInRange);
+                return false;
+            }
+
+            var connectedDiskIds = StorageNetwork.GetAllConnectedDiskIds(namedTerminal.Position);
+            if (connectedDiskIds.Count == 0)
+            {
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.NoStorageConnected);
+                return false;
+            }
+
+            terminal = namedTerminal;
+            diskIds = connectedDiskIds;
+            return true;
+        }
+
+        private static bool SenderMayOperateTerminal(int whoAmI, TerminalEntity terminal)
+        {
+            bool senderWithinRange = SenderIsAtBlock(whoAmI, terminal.Position);
+            bool senderHoldsRemoteTerminal = PlayerHoldsRemoteTerminal(whoAmI);
+
+            return DiskAccess.MayOperateTerminal(senderWithinRange, senderHoldsRemoteTerminal);
+        }
+
+        // Measured the way the two UI panels measure it, from the block's stored position rather
+        // than its 3x3 centre — see Common/TerminalReach.cs for why the centre was the wrong origin.
+        private static bool SenderIsAtBlock(int whoAmI, Point16 blockPosition)
+        {
+            var player = GetActiveSender(whoAmI);
+            if (player == null)
+                return false;
+
+            return TerminalReach.IsWithinRange(player.Center.X, player.Center.Y,
+                blockPosition.X, blockPosition.Y);
+        }
+
+        private static Player GetActiveSender(int whoAmI)
+        {
+            if (whoAmI < 0 || whoAmI >= Main.player.Length)
+                return null;
+
+            var player = Main.player[whoAmI];
+            return player != null && player.active ? player : null;
+        }
+
+        // The Remote Terminal exists to lift the range rule, so holding one is the second way to be
+        // at a Terminal. Which Terminal it is bound to is deliberately not asked: that id is item
+        // mod data, and a client writes its own inventory slots to the server, so the stricter
+        // question is forgeable at the same cost as this one and refuses nobody it should not.
+        private static bool PlayerHoldsRemoteTerminal(int whoAmI)
+        {
+            var player = GetActiveSender(whoAmI);
+            if (player == null)
+                return false;
+
+            foreach (var item in player.inventory)
+            {
+                if (item != null && !item.IsAir && item.ModItem is RemoteTerminal)
+                    return true;
+            }
+
+            return false;
+        }
+
+        // Whether the client that sent a packet may name this disk GUID. Disk GUIDs reach every
+        // client (StorageDiskBase.NetSend sends all 16 bytes), so the GUID itself establishes
+        // nothing — either no physical disk carries it, or the sender is the one carrying it.
+        private static bool SenderMayClaimDisk(int whoAmI, Guid diskId)
+        {
+            bool diskGuidInUse = IsDiskGuidInUse(diskId);
+            bool senderHoldsDisk = PlayerHoldsDisk(whoAmI, diskId);
+
+            return DiskClaim.SenderMayClaim(diskId, diskGuidInUse, senderHoldsDisk);
+        }
+
+        // Turn away a disk insert without costing the sender the disk or leaving it believing the
+        // insert happened. Both matter: the client puts the disk into its own copy of the bay and
+        // empties its cursor before the packet is sent, so a refusal that said nothing would leave
+        // that client showing a disk the server does not have, while the disk itself existed nowhere.
+        private static void RefuseInsert(Mod mod, int toClient, DriveBayEntity bay, Item item,
+            StorageOperationFailure failure)
+        {
+            if (bay != null)
+                SendSyncDriveBay(mod, bay, toClient);
+
+            // The disk coming back and the bay being corrected are what stop the item vanishing;
+            // the cause is what stops the player having to guess why. All three travel together so
+            // a future refusal cannot pick up two of the three.
+            RefuseOperation(mod, toClient, failure);
+
+            // Only ever a Storage Disk. The sender gave one up to send this packet; anything else in
+            // that slot was never theirs to be handed back.
+            if (item == null || item.IsAir || item.ModItem is not StorageDiskBase)
+                return;
+
+            SendReturnItemToClient(mod, toClient, item);
+        }
+
+        // True if this player physically holds a Storage Disk carrying that GUID.
+        private static bool PlayerHoldsDisk(int whoAmI, Guid diskId)
+        {
+            if (whoAmI < 0 || whoAmI >= Main.player.Length)
+                return false;
+
+            var player = Main.player[whoAmI];
+            if (player == null || !player.active)
+                return false;
+
+            foreach (var item in player.inventory)
+            {
+                if (item != null && !item.IsAir
+                    && item.ModItem is StorageDiskBase held && held.DiskId == diskId)
+                    return true;
+            }
+
+            return false;
+        }
+
+        // True if some physical disk in the world still carries that GUID — in a Drive Bay slot or
+        // in any player's inventory. Recovery only applies to data whose disk is actually lost.
+        private static bool IsDiskGuidInUse(Guid diskId)
+        {
+            if (diskId == Guid.Empty)
+                return true;
+
+            if (IsDiskGuidInAnyDriveBay(diskId))
+                return true;
+
+            for (int i = 0; i < Main.player.Length; i++)
+            {
+                if (Main.player[i] != null && Main.player[i].active && PlayerHoldsDisk(i, diskId))
+                    return true;
+            }
+
+            return false;
         }
 
         // ─── Delta Sync (Predictive Mode) ──────────────────────────────
@@ -1332,15 +1737,23 @@ namespace TerraStorage.Systems
 
         // Sends an operation response (success/failure) to the requesting client.
         // On failure, also sends full SyncDiskData correction packets for all affected disks.
-        public static void SendOperationResponse(Mod mod, int toClient, bool success,
-            List<Guid> affectedDiskIds = null)
+        public static void SendOperationResponse(Mod mod, int toClient,
+            StorageOperationFailure failure, List<Guid> affectedDiskIds = null)
         {
             if (Main.netMode != NetmodeID.Server)
                 return;
 
+            bool success = StorageOperationFailures.IsSuccess(failure);
+
             var packet = mod.GetPacket();
             packet.Write((byte)PacketType.OperationResponse);
             packet.Write(success);
+
+            // Appended last and only on a denial, so a success response stays the two bytes it has
+            // always been and the cause can never contradict the flag it travels behind.
+            if (!success)
+                packet.Write((byte)failure);
+
             packet.Send(toClient);
 
             // On failure, send full disk state corrections for all affected disks
@@ -1399,7 +1812,7 @@ namespace TerraStorage.Systems
                 {
                     // Item fully removed — remove all matching stacks
                     disk.Items.RemoveAll(s =>
-                        s.ModData == null && s.ItemType == entry.ItemType && s.PrefixId == entry.PrefixId);
+                        !s.IsUnique && s.ItemType == entry.ItemType && s.PrefixId == entry.PrefixId);
                 }
                 else
                 {
@@ -1408,7 +1821,7 @@ namespace TerraStorage.Systems
                     int currentTotal = 0;
                     foreach (var s in disk.Items)
                     {
-                        if (s.ModData == null && s.ItemType == entry.ItemType && s.PrefixId == entry.PrefixId)
+                        if (!s.IsUnique && s.ItemType == entry.ItemType && s.PrefixId == entry.PrefixId)
                         {
                             existing ??= s;
                             currentTotal += s.Stack;
@@ -1440,19 +1853,34 @@ namespace TerraStorage.Systems
                 }
             }
 
-            // Replace all unique (mod-data) items with the authoritative after-state
-            disk.Items.RemoveAll(s => s.ModData != null);
+            // Replace all items that stand for themselves with the authoritative after-state
+            disk.Items.RemoveAll(s => s.IsUnique);
             disk.Items.AddRange(delta.UniqueItemsAfter);
         }
 
         private static void HandleOperationResponse(BinaryReader reader)
         {
+            // Consumed before the netMode guard, the way every handler in this file consumes its
+            // payload before branching. The reader is one stream over the shared connection
+            // buffer, so a read this side skips is a byte the next packet inherits.
             bool success = reader.ReadBoolean();
+
+            byte reasonByte = 0;
+            var failure = StorageOperationFailure.None;
+            if (!success)
+            {
+                reasonByte = reader.ReadByte();
+                failure = StorageOperationFailures.GetFailureFromWireValue(reasonByte);
+            }
+
             if (Main.netMode != NetmodeID.MultiplayerClient) return;
 
             // On failure, correction packets (SyncDiskData) follow immediately and are
-            // handled by HandleSyncDiskData which resets local state. Nothing extra needed here.
-            DBG($"HandleOperationResponse: success={success}");
+            // handled by HandleSyncDiskData which resets local state.
+            DBG($"HandleOperationResponse: success={success} reasonByte={reasonByte} mapped={failure}");
+
+            if (!success)
+                StorageOperationReporter.ReportServerDenial(failure);
         }
 
         public static void SendRequestFullDiskSync(Mod mod, Guid diskId)
@@ -1474,6 +1902,15 @@ namespace TerraStorage.Systems
             var sys = StorageWorldSystem.Instance;
             var data = sys.GetDiskData(diskId);
             if (data == null) return;
+
+            // This is the one remaining handler that names a disk by GUID rather than by the block
+            // holding it, because a client asks for it after spotting a sequence gap and has only
+            // the GUID to go on. Serving it unconditionally hands any disk's whole contents to
+            // anyone who names it, which is the read half of the same hole the withdraw handlers
+            // had. A disk sitting in a bay is one the client is already told about; one in a chest,
+            // a bank or an offline player's inventory is not.
+            if (!IsDiskGuidInAnyDriveBay(diskId))
+                return;
 
             // Send full disk state with current sequence number
             int seq = sys.GetDiskSeqNum(diskId);
@@ -1529,32 +1966,72 @@ namespace TerraStorage.Systems
             var terminalPos = new Point16(tx, ty);
             if (!TileEntity.ByPosition.TryGetValue(terminalPos, out var entity)
                 || entity is not TerminalEntity)
+            {
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.NoTerminalFound);
                 return;
+            }
 
             // Validate player is within range
             var player = Main.player[whoAmI];
-            float dx = player.Center.X - (terminalPos.X * 16f + 24f);
-            float dy = player.Center.Y - (terminalPos.Y * 16f + 24f);
-            if (dx * dx + dy * dy > 240f * 240f) // 15 tiles in pixels
+            if (!SenderIsAtBlock(whoAmI, terminalPos))
+            {
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.NoStorageInRange);
                 return;
+            }
 
             var diskIds = StorageNetwork.GetAllConnectedDiskIds(terminalPos);
-            if (diskIds.Count == 0) return;
+            if (diskIds.Count == 0)
+            {
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.NoStorageConnected);
+                return;
+            }
 
             var existingTypes = StorageWorldSystem.Instance.GetItemCounts(diskIds);
 
-            StorageWorldSystem.Instance.BeginModificationTracking();
+            StorageWorldSystem.Instance.BeginModificationTracking(diskIds);
 
             var results = new List<(byte slot, int newStack)>();
+            bool matchedAnySlot = false;
+            bool anyDeposited = false;
+
             foreach (var (slotIdx, item) in slots)
             {
-                if (!existingTypes.ContainsKey(item.type)) continue;
+                if (slotIdx >= player.inventory.Length) continue;
 
-                int leftover = StorageWorldSystem.Instance.InsertItem(diskIds, item);
+                // Deposit the server's copy of that slot, not the item the packet carried. The
+                // packet only says WHICH slot to stack; taking its payload on trust would insert
+                // any quantity of any type the network already holds.
+                var held = player.inventory[slotIdx];
+                if (held == null || held.IsAir) continue;
+                if (held.type != item.type) continue;
+                if (!existingTypes.ContainsKey(held.type)) continue;
+
+                matchedAnySlot = true;
+
+                // Read the offered count BEFORE the insert, the way HandleDepositItem does: a slot
+                // that matched but bounced off a full network still lands in results, so the list's
+                // length says only that something was tried, never that anything moved.
+                int offered = held.stack;
+                int leftover = StorageWorldSystem.Instance.InsertItem(diskIds, held);
+
+                var outcome = new DepositOutcome(offered, leftover);
+                if (outcome.AnyDeposited)
+                    anyDeposited = true;
+
                 results.Add((slotIdx, leftover));
             }
 
-            EndTrackingAndRespond(mod, whoAmI, results.Count > 0, diskIds);
+            var quickStackFailure = StorageOperationFailures.GetQuickStackFailure(matchedAnySlot, anyDeposited);
+
+            // A slot that matched but bounced off a full network moved nothing, so there is no
+            // client state to correct — only a reason to report. This case used to report success
+            // and send nothing; sweeping every disk's full contents for it now would turn a
+            // spammable button into a resync storm. The nothing-matched case keeps its corrections,
+            // which it always sent.
+            var disksNeedingCorrection = quickStackFailure == StorageOperationFailure.NothingDeposited
+                ? null
+                : diskIds;
+            EndTrackingAndRespond(mod, whoAmI, quickStackFailure, disksNeedingCorrection);
 
             if (results.Count > 0)
             {
@@ -1591,14 +2068,5 @@ namespace TerraStorage.Systems
             }
         }
 
-        // ─── Helpers ────────────────────────────────────────────────────
-
-        private static List<Guid> ReadGuidList(BinaryReader reader, int count)
-        {
-            var list = new List<Guid>(count);
-            for (int i = 0; i < count; i++)
-                list.Add(new Guid(reader.ReadBytes(16)));
-            return list;
-        }
     }
 }

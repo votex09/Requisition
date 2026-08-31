@@ -10,6 +10,7 @@ using Terraria.Localization;
 using Terraria.ModLoader;
 using androLib;
 using androLib.UI;
+using TerraStorage.Common;
 using TerraStorage.Content.Tiles;
 using TerraStorage.Content.UI;
 using TerraStorage.Helpers;
@@ -42,10 +43,6 @@ namespace TerraStorage.Systems
     [JITWhenModsEnabled("androLib")]
     internal static class AndroLibBagButtons
     {
-        // 15 tiles in pixels, matching QuickStackSystem and the server-side range check in
-        // NetworkHandler.HandleDepositItemAtPosition.
-        private const float RangePixelsSq = 240f * 240f;
-
         // Adds the deposit button to every registered vacuum bag. AddBagUIEdit defers the AddButton
         // call into androLib's PostSetupResipes, which runs after BagUI.PreSetup builds the button
         // list (so the button is not wiped) and after every mod's PostSetupContent. storageID equals
@@ -76,7 +73,7 @@ namespace TerraStorage.Systems
                 && ModContent.GetInstance<TerminalUISystem>().IsTerminalOpen
                 && local.LastOpenedDiskIds.Count > 0)
             {
-                DepositToOpenNetwork(items, local.LastOpenedDiskIds.ToList());
+                DepositToOpenNetwork(items, local.LastOpenedDiskIds.ToList(), local.LastOpenedTerminalId);
                 return;
             }
 
@@ -92,7 +89,7 @@ namespace TerraStorage.Systems
             Main.NewText(Language.GetTextValue("Mods.TerraStorage.UI.VacuumBags.NoNetwork"));
         }
 
-        private static void DepositToOpenNetwork(Item[] items, List<Guid> diskIds)
+        private static void DepositToOpenNetwork(Item[] items, List<Guid> diskIds, int terminalEntityId)
         {
             bool client = Main.netMode == NetmodeID.MultiplayerClient;
             Mod mod = client ? ModContent.GetInstance<Requisition>() : null;
@@ -106,7 +103,7 @@ namespace TerraStorage.Systems
 
                 if (client)
                 {
-                    NetworkHandler.SendDepositItem(mod, diskIds, item);
+                    NetworkHandler.SendDepositItem(mod, terminalEntityId, item);
                     item.TurnToAir();
                 }
                 else
@@ -174,10 +171,14 @@ namespace TerraStorage.Systems
                 if (kvp.Value is not TerminalEntity terminal)
                     continue;
 
-                float dx = player.Center.X - (terminal.Position.X * 16f + 24f);
-                float dy = player.Center.Y - (terminal.Position.Y * 16f + 24f);
+                if (!TerminalReach.IsWithinRange(player.Center.X, player.Center.Y,
+                        terminal.Position.X, terminal.Position.Y))
+                    continue;
+
+                float dx = player.Center.X - terminal.Position.X * TerminalReach.GetTilePixelSize();
+                float dy = player.Center.Y - terminal.Position.Y * TerminalReach.GetTilePixelSize();
                 float distSq = dx * dx + dy * dy;
-                if (distSq > RangePixelsSq || distSq >= bestSq)
+                if (distSq >= bestSq)
                     continue;
 
                 if (StorageNetwork.GetAllConnectedDiskIds(terminal.Position).Count == 0)

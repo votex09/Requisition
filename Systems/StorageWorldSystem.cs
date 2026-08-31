@@ -60,15 +60,32 @@ namespace TerraStorage.Systems
         //Remove sequence tracking for a disk (used when disk is removed).
         public void RemoveDiskSeqNum(Guid diskId) => _diskSeqNums.Remove(diskId);
 
-        public void BeginModificationTracking()
+        // Snapshots the disks this operation can touch, so the deltas afterwards have a before-state
+        // to compare against.
+        //
+        // Scoped, not the whole registry. Snapshotting every entry made registry size a multiplier on
+        // EVERY deposit, withdrawal, craft and quick-stack - and the registry grows on inserts nobody
+        // can bound (issue 27). An operation reaches the disks of the Terminal it was issued from and
+        // no others, so that network is the honest scope.
+        //
+        // Under-scoping cannot corrupt a client: a disk modified without a snapshot is reported for a
+        // full resync rather than given an empty before-state, which would have read as "everything
+        // on this disk is new".
+        public void BeginModificationTracking(IEnumerable<Guid> operationDiskIds)
         {
             _modifiedTracker = new HashSet<Guid>();
-
-            // Snapshot all disk states so we can compute item-level deltas after the operation.
             _preModificationSnapshot = new Dictionary<Guid, List<StoredItemStack>>();
-            foreach (var kvp in _allDiskData)
+
+            if (operationDiskIds == null)
+                return;
+
+            foreach (var diskId in operationDiskIds)
             {
-                _preModificationSnapshot[kvp.Key] = SnapshotItems(kvp.Value.Items);
+                if (_preModificationSnapshot.ContainsKey(diskId))
+                    continue;
+
+                if (_allDiskData.TryGetValue(diskId, out var disk))
+                    _preModificationSnapshot[diskId] = SnapshotItems(disk.Items);
             }
         }
 
@@ -83,17 +100,30 @@ namespace TerraStorage.Systems
         // Ends modification tracking and computes item-level deltas for each modified disk.
         // Returns (modifiedDiskIds, deltas) where deltas maps diskGuid → list of changed items.
         // Each delta entry is the NEW state of that item stack on the disk (or stack=0 if removed). 
-        public (List<Guid> modified, Dictionary<Guid, DiskDelta> deltas) EndModificationTrackingWithDeltas()
+        // needsFullSync names disks that changed without a snapshot to compare against, so no delta
+        // describes them. Treating a missing snapshot as "the disk was empty before" would tell the
+        // client every stack on it had just appeared, which for a disk it already knows is a
+        // duplicated view of the whole disk. The caller sends those in full instead.
+        public (List<Guid> modified, Dictionary<Guid, DiskDelta> deltas, List<Guid> needsFullSync)
+            EndModificationTrackingWithDeltas()
         {
             var modifiedIds = _modifiedTracker?.ToList() ?? new List<Guid>();
             var deltas = new Dictionary<Guid, DiskDelta>();
+            var needsFullSync = new List<Guid>();
 
             if (_preModificationSnapshot != null)
             {
                 foreach (var diskId in modifiedIds)
                 {
-                    var before = _preModificationSnapshot.TryGetValue(diskId, out var snap)
-                        ? snap : new List<StoredItemStack>();
+                    if (!_preModificationSnapshot.TryGetValue(diskId, out var before))
+                    {
+                        // Bumped here, like a delta's, so the full state that goes out instead is not
+                        // read as older than deltas the client has already applied.
+                        IncrementDiskSeqNum(diskId);
+                        needsFullSync.Add(diskId);
+                        continue;
+                    }
+
                     var after = _allDiskData.TryGetValue(diskId, out var disk)
                         ? disk.Items : new List<StoredItemStack>();
 
@@ -105,7 +135,7 @@ namespace TerraStorage.Systems
 
             _modifiedTracker = null;
             _preModificationSnapshot = null;
-            return (modifiedIds, deltas);
+            return (modifiedIds, deltas, needsFullSync);
         }
 
         //Shallow-clone item list for snapshotting (clones each StoredItemStack's mutable fields).
@@ -114,14 +144,21 @@ namespace TerraStorage.Systems
             var snapshot = new List<StoredItemStack>(items.Count);
             foreach (var s in items)
             {
-                snapshot.Add(new StoredItemStack
+                var copy = new StoredItemStack
                 {
                     ItemType = s.ItemType,
                     Stack = s.Stack,
                     PrefixId = s.PrefixId,
                     InsertionOrder = s.InsertionOrder,
-                    ModData = s.ModData
-                });
+                    ModData = s.ModData,
+                    FullItemTag = s.FullItemTag
+                };
+
+                // Every server operation snapshots every disk. Rebuilding each copy's item to
+                // re-decide what the original already knows would put a full deserialization per
+                // stack on the netcode path.
+                copy.CopyIdentityVerdictFrom(s);
+                snapshot.Add(copy);
             }
             return snapshot;
         }
@@ -131,8 +168,8 @@ namespace TerraStorage.Systems
         {
             var delta = new DiskDelta();
 
-            // Build lookup: (itemType, prefixId) → total stack for items WITHOUT mod data.
-            // Items WITH mod data are unique and tracked individually.
+            // Build lookup: (itemType, prefixId) → total stack for items that pool.
+            // Items that stand for themselves are tracked individually.
             var beforeCounts = new Dictionary<(int type, int prefix), int>();
             var afterCounts = new Dictionary<(int type, int prefix), int>();
             var beforeUnique = new List<StoredItemStack>();
@@ -140,14 +177,14 @@ namespace TerraStorage.Systems
 
             foreach (var s in before)
             {
-                if (s.ModData != null) { beforeUnique.Add(s); continue; }
+                if (s.IsUnique) { beforeUnique.Add(s); continue; }
                 var key = (s.ItemType, s.PrefixId);
                 beforeCounts.TryGetValue(key, out int existing);
                 beforeCounts[key] = existing + s.Stack;
             }
             foreach (var s in after)
             {
-                if (s.ModData != null) { afterUnique.Add(s); continue; }
+                if (s.IsUnique) { afterUnique.Add(s); continue; }
                 var key = (s.ItemType, s.PrefixId);
                 afterCounts.TryGetValue(key, out int existing);
                 afterCounts[key] = existing + s.Stack;
@@ -226,8 +263,8 @@ namespace TerraStorage.Systems
         public List<ConsolidatedItem> GetConsolidatedItems(IEnumerable<Guid> diskIds)
         {
             var consolidated = new Dictionary<(int type, int prefix), ConsolidatedItem>();
-            // Items with per-instance mod data (UnloadedItems, disks, etc.) are unique and
-            // must never be merged — each gets its own grid slot.
+            // Items that stand for themselves (UnloadedItems, disks, anything the game refuses to
+            // stack) must never be merged — each gets its own grid slot.
             var uniqueEntries = new List<ConsolidatedItem>();
 
             foreach (var diskId in diskIds)
@@ -237,7 +274,7 @@ namespace TerraStorage.Systems
 
                 foreach (var stored in disk.Items)
                 {
-                    if (stored.ModData != null || stored.FullItemTag != null)
+                    if (stored.IsUnique)
                     {
                         uniqueEntries.Add(new ConsolidatedItem
                         {
@@ -293,8 +330,8 @@ namespace TerraStorage.Systems
             // per-instance GlobalItem state, so serializing the clone can lose that data.
             var originalTag = ItemIO.Save(item);
 
-            // Always pass the pre-serialized tag so DiskData can compare globalData
-            // between the incoming item and stored items to decide whether to merge.
+            // Always pass the pre-serialized tag so the stack keeps every byte the original
+            // item carried, whatever it later pools with.
             TagCompound tagToPreserve = originalTag;
 
             foreach (var diskId in diskIds)
@@ -324,24 +361,19 @@ namespace TerraStorage.Systems
             if (item == null || item.IsAir) return true;
             int remaining = item.stack;
 
-            // Items with per-instance mod data don't stack — only check free slots.
-            bool hasModData = false;
-            if (item.ModItem != null)
-            {
-                var tag = new TagCompound();
-                item.ModItem.SaveData(tag);
-                hasModData = tag.Count > 0;
-            }
+            // An item that stands for itself never pools — only free slots can take it.
+            bool isUnique = DiskData.IsUniqueItem(item);
 
             foreach (var diskId in diskIds)
             {
                 if (!_allDiskData.TryGetValue(diskId, out var disk)) continue;
 
-                if (!hasModData)
+                if (!isUnique)
                 {
                     foreach (var stored in disk.Items)
                     {
-                        if (stored.ItemType == item.type && stored.PrefixId == item.prefix && stored.Stack < item.maxStack)
+                        if (stored.ItemType == item.type && stored.PrefixId == item.prefix
+                            && !stored.IsUnique && stored.Stack < item.maxStack)
                         {
                             remaining -= item.maxStack - stored.Stack;
                             if (remaining <= 0) return true;
@@ -359,40 +391,255 @@ namespace TerraStorage.Systems
             return remaining <= 0;
         }
 
-        // Extract an item from across multiple disks.
+        // Extract an item from across multiple disks. A withdrawal onto the cursor or into the
+        // player's inventory holds exactly one item, so the sweep stops at the first state boundary
+        // and hands that draw straight back - what every UI and network caller has always seen.
         public Item ExtractItem(IEnumerable<Guid> diskIds, int itemType, int count, int prefixId = -1)
         {
-            // Use the item returned by DiskData.ExtractItem directly so that mod data
-            // (e.g. UnloadedItem's original tag, Storage Disk GUIDs) is preserved.
-            // Reconstructing via SetDefaults would produce a blank item with no state.
-            Item result = null;
-            int totalExtracted = 0;
+            const int oneItemHandle = 1;
+            List<Item> drawn = ExtractItemStacks(diskIds, itemType, count, prefixId, oneItemHandle);
+            return drawn.Count == 0 ? new Item() : drawn[0];
+        }
+
+        // Drains up to `count` across the network in ONE sweep, one item per run of consecutive draws that
+        // share mod state. A caller that can hold several items - a crafting step paying for itself
+        // out of stacks that each stand for themselves - no longer walks every disk once per stack.
+        public List<Item> ExtractItemStacks(IEnumerable<Guid> diskIds, int itemType, int count, int prefixId = -1)
+            => ExtractItemStacks(diskIds, itemType, count, prefixId, int.MaxValue);
+
+        private List<Item> ExtractItemStacks(IEnumerable<Guid> diskIds, int itemType, int count,
+            int prefixId, int handleLimit)
+        {
+            var diskList = diskIds as List<Guid> ?? diskIds.ToList();
+            var withdrawal = new DiskWithdrawal(this, diskList, itemType, prefixId);
+
+            List<WithdrawalHandle> handles = NetworkWithdrawal.Drain(withdrawal, count, handleLimit);
+            List<Item> drawn = withdrawal.BuildItems(handles);
+            if (drawn.Count == 0)
+                return drawn;
+
+            StorageVersion++;
+            BackupSystem.MarkDirty();
+            return drawn;
+        }
+
+        // Binds the withdrawal sweep to real disks. Everything Terraria-shaped lives here - building
+        // the item, reading NBT to decide whether two draws may share one - so the rule itself stays
+        // in NetworkWithdrawal where it can be exercised without a live world.
+        private sealed class DiskWithdrawal : IWithdrawalNetwork
+        {
+            private readonly StorageWorldSystem _storage;
+            private readonly List<Guid>         _diskIds;
+            private readonly int                _itemType;
+            private readonly int                _prefixId;
+
+            private readonly List<Item> _drawnItems = new();
+
+            private Item        _previousDraw;
+            private TagCompound _previousDrawState;
+            private int         _drawnRunIndex;
+
+            public DiskWithdrawal(StorageWorldSystem storage, List<Guid> diskIds, int itemType, int prefixId)
+            {
+                _storage = storage;
+                _diskIds = diskIds;
+                _itemType = itemType;
+                _prefixId = prefixId;
+            }
+
+            public int DiskCount => _diskIds.Count;
+
+            public DrawnUnits DrawPooled(int diskIndex, int amount)
+            {
+                if (!TryGetDisk(diskIndex, out DiskData disk))
+                    return DrawnUnits.Nothing(diskIndex);
+
+                Item extracted = disk.ExtractItem(_itemType, amount, _prefixId,
+                    allowUniqueFallback: false, out _, out TagCompound modState);
+                return Record(diskIndex, extracted, modState);
+            }
+
+            public DrawnUnits DrawStandalone(int diskIndex, int amount)
+            {
+                if (!TryGetDisk(diskIndex, out DiskData disk))
+                    return DrawnUnits.Nothing(diskIndex);
+
+                Item extracted = disk.ExtractItem(_itemType, amount, _prefixId,
+                    allowUniqueFallback: true, out bool standaloneStack, out TagCompound modState);
+
+                // Pooled stock is exhausted network-wide before this pass runs, so anything that is
+                // not a stack standing for itself means the disk had nothing left to give. Should
+                // that ever stop holding, the draw goes back to the network rather than to the one
+                // disk, whose slot layout this draw may not match - dropping it would destroy it.
+                if (!standaloneStack)
+                {
+                    if (!extracted.IsAir)
+                        _storage.InsertItem(_diskIds, extracted);
+                    return DrawnUnits.Nothing(diskIndex);
+                }
+
+                return Record(diskIndex, extracted, modState);
+            }
+
+            public void PutBack(DrawnUnits draw)
+            {
+                if (!TryGetDisk(draw.DiskIndex, out DiskData disk))
+                    return;
+
+                // Back into the disk whose slots this same draw just freed, so the insert cannot
+                // come up short.
+                disk.InsertItem(_drawnItems[draw.DrawIndex], ++_storage._insertionCounter);
+                _drawnItems[draw.DrawIndex] = null;
+            }
+
+            // One item per handle, carrying the state of the draw that opened it and the units of
+            // every draw folded into it.
+            public List<Item> BuildItems(List<WithdrawalHandle> handles)
+            {
+                var items = new List<Item>(handles.Count);
+
+                foreach (WithdrawalHandle handle in handles)
+                {
+                    Item item = _drawnItems[handle.Draws[0].DrawIndex];
+                    item.stack = handle.Units;
+                    items.Add(item);
+
+                    // Only disks behind draws the sweep kept changed; one that was put back left its
+                    // disk as it found it.
+                    foreach (DrawnUnits draw in handle.Draws)
+                        _storage._modifiedTracker?.Add(_diskIds[draw.DiskIndex]);
+                }
+
+                return items;
+            }
+
+            private bool TryGetDisk(int diskIndex, out DiskData disk)
+                => _storage._allDiskData.TryGetValue(_diskIds[diskIndex], out disk);
+
+            private DrawnUnits Record(int diskIndex, Item extracted, TagCompound modState)
+            {
+                if (extracted.IsAir)
+                    return DrawnUnits.Nothing(diskIndex);
+
+                int stateGroup = RunIndexOf(extracted, modState);
+                _drawnItems.Add(extracted);
+                return new DrawnUnits(diskIndex, _drawnItems.Count - 1, extracted.stack, stateGroup);
+            }
+
+            // Reduces "would folding these two discard anything" to an integer the sweep can
+            // compare. It numbers RUNS of consecutive draws rather than distinct states, because
+            // the sweep only ever weighs a draw against the handle it is holding open - a state
+            // that comes back later opens a new handle either way (NW-09).
+            //
+            // Prefix counts as much as mod state: a withdrawal naming no prefix matches every stack
+            // of the type, and one returned Item carries one prefix, so folding two would stamp the
+            // first draw's prefix onto units that never had it. The tag comes from the disk that
+            // just built it, so this costs no serialization.
+            private int RunIndexOf(Item drawn, TagCompound modState)
+            {
+                if (_previousDraw != null)
+                {
+                    bool prefixChanged = _previousDraw.prefix != drawn.prefix;
+                    bool modStateChanged = !DiskData.ModStateMatches(_previousDrawState, modState);
+
+                    if (prefixChanged || modStateChanged)
+                        _drawnRunIndex++;
+                }
+
+                _previousDraw = drawn;
+                _previousDrawState = modState;
+                return _drawnRunIndex;
+            }
+        }
+
+        // Takes back units carrying exactly the state `stored` was inserted with, so recovering what
+        // a crafting run conjured does not take the player's stack of the same type instead. A
+        // matching stack larger than `refuseIfLargerThan` also holds units this run did not store,
+        // so it is refused rather than taken whole.
+        public Item ExtractStoredItem(IEnumerable<Guid> diskIds, Item stored, int refuseIfLargerThan)
+        {
+            if (stored == null || stored.IsAir || refuseIfLargerThan <= 0)
+                return new Item();
+
+            TagCompound modItemData = ModItemDataOf(stored);
+            var fullItemTag = ItemIO.Save(stored);
+
+            bool hasModItemData = modItemData != null;
+            bool carriesModWrittenData = fullItemTag.ContainsKey("globalData");
+
+            // Nothing to recognise it by, so there is nothing to be precise about: one plain unit is
+            // as good as another and the caller's draw by type is already right.
+            if (!StackIdentity.MustPreserveFullTag(hasModItemData, carriesModWrittenData))
+                return new Item();
+
+            // One sweep for the whole amount. The tags above cost a serialization each to build, and
+            // asking per stored stack rebuilt them every time.
+            Item recovered = new Item();
+            int stillWanted = refuseIfLargerThan;
 
             foreach (var diskId in diskIds)
             {
                 if (!_allDiskData.TryGetValue(diskId, out var disk))
                     continue;
 
-                int needed = count - totalExtracted;
-                var extracted = disk.ExtractItem(itemType, needed, prefixId);
-                if (extracted.IsAir)
-                    continue;
+                // A disk can hold several stacks of one state when the insert outgrew a slot, so it
+                // is asked until it stops yielding. Folding them is safe here in a way it is not for
+                // a general withdrawal: every stack matched the SAME tags, so no stack's state is
+                // being stamped onto units from another.
+                while (stillWanted > 0)
+                {
+                    var extracted = disk.ExtractStoredStack(stored.type, stored.prefix, modItemData,
+                        fullItemTag, stillWanted);
+                    if (extracted.IsAir)
+                        break;
 
-                totalExtracted += extracted.stack;
-                result ??= extracted;
-                _modifiedTracker?.Add(diskId);
+                    if (recovered.IsAir)
+                        recovered = extracted;
+                    else
+                        recovered.stack += extracted.stack;
 
-                if (totalExtracted >= count)
+                    stillWanted -= extracted.stack;
+
+                    StorageVersion++;
+                    BackupSystem.MarkDirty();
+                    _modifiedTracker?.Add(diskId);
+                }
+
+                if (stillWanted <= 0)
                     break;
             }
 
-            if (result == null)
-                return new Item();
+            return recovered;
+        }
 
-            StorageVersion++;
-            BackupSystem.MarkDirty();
-            result.stack = totalExtracted;
-            return result;
+        private static TagCompound ModItemDataOf(Item item)
+        {
+            if (item.ModItem == null)
+                return null;
+
+            var tag = new TagCompound();
+            item.ModItem.SaveData(tag);
+            return tag.Count > 0 ? tag : null;
+        }
+
+        // Whether two live items are in the same state, on the same terms ExtractStoredStack matches
+        // a stored stack on. Used by the refund to tell the product a run conjured from the player's
+        // own stock of that type, which position alone cannot do: a product lands in the first disk
+        // with room, ahead of stock the player holds on a later disk.
+        public static bool ItemsShareStoredState(Item first, Item second)
+        {
+            if (first == null || second == null || first.IsAir || second.IsAir)
+                return false;
+
+            if (first.type != second.type || first.prefix != second.prefix)
+                return false;
+
+            TagCompound firstModItemData = ModItemDataOf(first);
+            TagCompound secondModItemData = ModItemDataOf(second);
+            if (!DiskData.ModItemDataMatches(firstModItemData, secondModItemData))
+                return false;
+
+            return DiskData.ModStateMatches(ItemIO.Save(first), ItemIO.Save(second));
         }
 
         // Extract a specific per-instance item (e.g. UnloadedItem) identified by its exact
@@ -458,6 +705,23 @@ namespace TerraStorage.Systems
         // Get all disk data in the world.
         public IReadOnlyCollection<DiskData> GetAllDiskData() => _allDiskData.Values;
 
+        // Drop the entry for a disk that has just left its Drive Bay, but only when it is empty and
+        // no other bay still holds that GUID. Both arms are the safety argument: an entry with items
+        // is somebody's storage, and DiskAccess.MayPruneDiskData explains why the weaker "no disk in
+        // the world carries this id" rule cannot be used. Returns whether anything was dropped.
+        public bool PruneEmptyDiskData(Guid diskId, bool anotherBayHoldsDisk)
+        {
+            if (!_allDiskData.TryGetValue(diskId, out var data))
+                return false;
+
+            if (!DiskAccess.MayPruneDiskData(data.UsedStacks, anotherBayHoldsDisk))
+                return false;
+
+            RemoveDiskData(diskId);
+            RemoveDiskSeqNum(diskId);
+            return true;
+        }
+
         // Remove a disk's data entry (used when reassigning a blank disk's GUID during recovery).
         public void RemoveDiskData(Guid diskId)
         {
@@ -495,92 +759,29 @@ namespace TerraStorage.Systems
             return items;
         }
 
-        // Defragments the given disks (in the order provided) by moving item stacks from
-        // later disks into free space on earlier disks.  Respects item identity:
-        //   • Stacks without ModData are merged up to maxStack with matching type+prefix stacks.
-        //   • Stacks with ModData (unique items) are moved whole to an empty slot only.
+        // Defragments the given disks, in the order provided, by moving stacks from later disks into
+        // free space on earlier ones. The sweep is DefragmentCore.Sweep; this resolves the GUIDs it
+        // works over and supplies the rules that need Terraria.
         // Returns the GUIDs of every disk whose Items list was modified.
         public List<Guid> Defragment(List<Guid> orderedDiskIds)
         {
-            var disks = orderedDiskIds
+            var diskData = orderedDiskIds
                 .Select(id => _allDiskData.TryGetValue(id, out var d) ? d : null)
                 .Where(d => d != null)
                 .ToList();
 
+            var disks = new List<DefragmentDisk<StoredItemStack>>(diskData.Count);
+            foreach (var data in diskData)
+                disks.Add(new DefragmentDisk<StoredItemStack>(data.Items, data.MaxStacks));
+
+            List<int> movedDiskIndices = DefragmentCore.Sweep(disks,
+                new StoredStackRules(new Dictionary<int, int>()));
+
+            // A disk named twice in the request is two indices for one GUID, so the ids are
+            // deduplicated rather than the indices.
             var modified = new HashSet<Guid>();
-
-            for (int ti = 0; ti < disks.Count - 1; ti++)
-            {
-                var target = disks[ti];
-                if (target.IsFull) continue;
-
-                for (int di = ti + 1; di < disks.Count && !target.IsFull; di++)
-                {
-                    var donor = disks[di];
-                    if (donor.Items.Count == 0) continue;
-
-                    for (int si = donor.Items.Count - 1; si >= 0 && !target.IsFull; si--)
-                    {
-                        var stack = donor.Items[si];
-
-                        if (stack.ModData != null)
-                        {
-                            // Unique item — move whole stack to a free slot only.
-                            target.Items.Add(stack);
-                            donor.Items.RemoveAt(si);
-                            modified.Add(target.DiskId);
-                            modified.Add(donor.DiskId);
-                        }
-                        else
-                        {
-                            // Plain item — merge into existing partial stacks first, then add new slot.
-                            var tempItem = new Terraria.Item();
-                            tempItem.SetDefaults(stack.ItemType);
-                            int maxStack = tempItem.maxStack;
-                            int toMove = stack.Stack;
-
-                            foreach (var existing in target.Items)
-                            {
-                                if (existing.ItemType == stack.ItemType
-                                    && existing.PrefixId == stack.PrefixId
-                                    && existing.ModData == null
-                                    && existing.Stack < maxStack)
-                                {
-                                    int canAdd = Math.Min(toMove, maxStack - existing.Stack);
-                                    existing.Stack += canAdd;
-                                    toMove -= canAdd;
-                                    if (toMove == 0) break;
-                                }
-                            }
-
-                            while (toMove > 0 && !target.IsFull)
-                            {
-                                int addAmount = Math.Min(toMove, maxStack);
-                                target.Items.Add(new StoredItemStack
-                                {
-                                    ItemType     = stack.ItemType,
-                                    Stack        = addAmount,
-                                    PrefixId     = stack.PrefixId,
-                                    InsertionOrder = stack.InsertionOrder,
-                                    ModData      = null
-                                });
-                                toMove -= addAmount;
-                            }
-
-                            if (toMove < stack.Stack)
-                            {
-                                modified.Add(target.DiskId);
-                                modified.Add(donor.DiskId);
-                            }
-
-                            if (toMove == 0)
-                                donor.Items.RemoveAt(si);
-                            else
-                                stack.Stack = toMove;
-                        }
-                    }
-                }
-            }
+            foreach (int diskIndex in movedDiskIndices)
+                modified.Add(diskData[diskIndex].DiskId);
 
             if (modified.Count > 0)
             {
@@ -589,6 +790,65 @@ namespace TerraStorage.Systems
             }
 
             return modified.ToList();
+        }
+
+        // The live bindings for the sweep: every question about a stored stack that needs a
+        // TagCompound or an Item, and nothing else. The sweep itself is Terraria-free and lives in
+        // Common/DefragmentCore.cs, where it runs under test.
+        private readonly struct StoredStackRules : IDefragmentRules<StoredItemStack>
+        {
+            // maxStack needs an Item to read, which is far too expensive to rebuild per stack.
+            private readonly Dictionary<int, int> _maxStackByItemType;
+
+            public StoredStackRules(Dictionary<int, int> maxStackByItemType)
+            {
+                _maxStackByItemType = maxStackByItemType;
+            }
+
+            public int GetItemType(StoredItemStack stack) => stack.ItemType;
+
+            public int GetPrefixId(StoredItemStack stack) => stack.PrefixId;
+
+            public int GetCount(StoredItemStack stack) => stack.Stack;
+
+            public void SetCount(StoredItemStack stack, int count) => stack.Stack = count;
+
+            public bool IsUnique(StoredItemStack stack) => DiskData.HasPerInstanceData(stack);
+
+            public bool CanMerge(StoredItemStack target, StoredItemStack donor)
+                => DiskData.CanMergeStacks(target, donor);
+
+            public StoredItemStack CopyWithCount(StoredItemStack source, int count)
+                => CopyStackWithCount(source, count);
+
+            public int GetMaxStack(StoredItemStack stack)
+            {
+                if (_maxStackByItemType.TryGetValue(stack.ItemType, out int cached))
+                    return cached;
+
+                var tempItem = new Item();
+                tempItem.SetDefaults(stack.ItemType);
+                _maxStackByItemType[stack.ItemType] = tempItem.maxStack;
+                return tempItem.maxStack;
+            }
+        }
+
+        // A relocated stack keeps everything that identifies it, or defragmenting would quietly
+        // strip the per-instance data the identity rule just protected.
+        private static StoredItemStack CopyStackWithCount(StoredItemStack source, int count)
+        {
+            var copy = new StoredItemStack
+            {
+                ItemType       = source.ItemType,
+                Stack          = count,
+                PrefixId       = source.PrefixId,
+                InsertionOrder = source.InsertionOrder,
+                ModData        = source.ModData,
+                FullItemTag    = source.FullItemTag
+            };
+
+            copy.CopyIdentityVerdictFrom(source);
+            return copy;
         }
 
         private static void DBG(string msg)
@@ -606,8 +866,15 @@ namespace TerraStorage.Systems
 
         // Register a disk with a pre-existing item list (used when an unarchived disk is
         // first inserted into a Drive Bay to restore its items into this world).
-        public void RegisterDiskWithItems(Guid diskId, DiskTier tier, List<StoredItemStack> items)
+        // Returns false when the GUID already names a disk. Restoring replaces everything the GUID
+        // held, and the GUID reaching here came off a disk item that crossed the network, so this
+        // may only ever create a disk - never overwrite one.
+        public bool RegisterDiskWithItems(Guid diskId, DiskTier tier, List<StoredItemStack> items)
         {
+            bool worldAlreadyHasDisk = _allDiskData.ContainsKey(diskId);
+            if (!DiskClaim.MayRestoreArchivedItems(worldAlreadyHasDisk))
+                return false;
+
             var data = new DiskData
             {
                 DiskId = diskId,
@@ -617,12 +884,18 @@ namespace TerraStorage.Systems
             _allDiskData[diskId] = data;
             StorageVersion++;
             BackupSystem.MarkDirty();
+            return true;
         }
 
         // Applies a DiskData received from the server, replacing any local copy.
         // Used by clients in multiplayer to stay in sync with the authoritative server state.
+        // Guarded here rather than at each caller: this replaces a whole disk, so a handler that
+        // forgets its own netMode check must not be able to let a client rewrite server storage.
         public void ApplyDiskDataFromNetwork(DiskData data)
         {
+            if (Terraria.Main.netMode != Terraria.ID.NetmodeID.MultiplayerClient)
+                return;
+
             if (data == null)
                 return;
 
@@ -635,6 +908,13 @@ namespace TerraStorage.Systems
         {
             if (_allDiskData.TryGetValue(diskId, out var data))
             {
+                // Upgrades only ever go up. The stale-tier case this exists to correct is a disk
+                // whose world entry lags the item, never the reverse - and a disk item claiming a
+                // lower tier came off the network, where lowering a disk below what it already
+                // holds is a way to break it rather than a way to fix it.
+                if (newTier < data.Tier)
+                    return;
+
                 // No-op when the tier is unchanged. This is called for every disk on every disk-
                 // connection refresh (~every 2s while a Terminal is open) to defensively sync the
                 // tier; bumping StorageVersion / marking the backup dirty here forced a full UI

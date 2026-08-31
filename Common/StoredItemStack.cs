@@ -27,6 +27,128 @@ namespace TerraStorage.Common
         // is used for world-save and extraction instead of reconstructing from scratch.
         public TagCompound FullItemTag { get; set; }
 
+        private bool? _isUnique;
+        private Item _identityItem;
+
+        // Whether this stack stands for one particular item rather than so many units of a type.
+        // Decided once by asking the game the same question a chest asks, then cached: the terminal
+        // grid re-reads it for every stack on every refresh.
+        public bool IsUnique
+        {
+            get
+            {
+                _isUnique ??= StackIdentity.IsUnique(ModData != null, GameRefusesToStackWithPlainItem());
+                return _isUnique.Value;
+            }
+        }
+
+        // Carries an already-decided verdict onto a copy, so snapshots and clones do not pay for
+        // rebuilding the item the verdict came from.
+        public void CopyIdentityVerdictFrom(StoredItemStack source)
+        {
+            source._isUnique ??= StackIdentity.IsUnique(source.ModData != null,
+                source.GameRefusesToStackWithPlainItem());
+            _isUnique = source._isUnique;
+        }
+
+        public bool StacksWith(StoredItemStack other)
+        {
+            if (ItemType != other.ItemType || PrefixId != other.PrefixId)
+                return false;
+
+            if (!IsUnique && !other.IsUnique)
+                return true;
+
+            if (ModData != null || other.ModData != null)
+                return false;
+
+            return GameAllowsStacking(GetIdentityItem(), other.GetIdentityItem());
+        }
+
+        public bool StacksWith(Item incoming, bool incomingIsUnique)
+        {
+            if (!IsUnique && !incomingIsUnique)
+                return true;
+
+            if (ModData != null)
+                return false;
+
+            return GameAllowsStacking(GetIdentityItem(), incoming);
+        }
+
+        // Asked both ways round: tModLoader runs the hooks on the destination only, so a mod that
+        // inspects just its own side would wave through a special item merging into a plain one.
+        public static bool GameAllowsStacking(Item first, Item second)
+            => ItemLoader.CanStack(first, second) && ItemLoader.CanStack(second, first);
+
+        // This stack as an Item, for identity questions only. Never handed to a caller that would
+        // mutate it; extraction builds its own.
+        private Item GetIdentityItem()
+        {
+            if (_identityItem != null)
+                return _identityItem;
+
+            _identityItem = LoadFullItem();
+            if (_identityItem != null)
+                return _identityItem;
+
+            _identityItem = ToItem();
+            if (ModData != null && _identityItem.ModItem != null)
+                _identityItem.ModItem.LoadData(ModData);
+            return _identityItem;
+        }
+
+        // Deliberately does NOT go through GetIdentityItem: every stack in a modded world reaches
+        // here once, and holding an Item per stack afterwards is what the identity cache exists to
+        // avoid. Only stacks that turn out to stand for themselves keep one.
+        private bool GameRefusesToStackWithPlainItem()
+        {
+            var loaded = LoadFullItem();
+            if (loaded == null)
+                return false;
+
+            return !GameAllowsStacking(PlainItemCache.Get(ItemType, PrefixId), loaded);
+        }
+
+        // A tag written by an older format, or by a mod since removed, can still fail to load. That
+        // is not a reason to refuse to draw the terminal, so the stack falls back to being plain.
+        private Item LoadFullItem()
+        {
+            if (FullItemTag == null)
+                return null;
+
+            try
+            {
+                return ItemIO.Load(FullItemTag);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // A chest lets the mod fold an incoming item's state into the stack it lands on, through
+        // OnStack. Only reached when the two carry different state, so an ordinary deposit never
+        // pays for it. The destination is presented at its real size first: a mod averaging or
+        // apportioning over the stack is told how much it is merging into.
+        public void FoldInModState(Item incoming, int transferred)
+        {
+            var destination = LoadFullItem() ?? GetIdentityItem().Clone();
+
+            destination.stack = Stack;
+            ItemLoader.OnStack(destination, incoming, transferred);
+            destination.stack = Stack + transferred;
+
+            FullItemTag = ItemIO.Save(destination);
+            ResetIdentityCaches();
+        }
+
+        private void ResetIdentityCaches()
+        {
+            _isUnique = null;
+            _identityItem = null;
+        }
+
         public StoredItemStack() { }
 
         // Creates a <see cref="StoredItemStack"/> from a live <see cref="Item"/>,
@@ -101,6 +223,9 @@ namespace TerraStorage.Common
             // Once this world is re-saved with the current format this path is never hit again.
             bool isIntermediateFormat = tag.ContainsKey("prefix") && !tag.TryGet<byte>("prefix", out _);
             Item item;
+            // Whatever is kept has to be a tag ItemIO can read back: the intermediate format is not,
+            // and identity questions now load it long before the next world save would.
+            TagCompound loadableTag = tag;
             if (isIntermediateFormat)
             {
                 // Convert to a proper ItemIO-format tag so ItemIO.Load handles unloaded
@@ -114,6 +239,7 @@ namespace TerraStorage.Common
                 if (prefixVal != 0) ioTag["prefix"] = (byte)prefixVal;
                 if (tag.ContainsKey("modData")) ioTag["data"] = tag.Get<TagCompound>("modData");
                 item = ItemIO.Load(ioTag);
+                loadableTag = ioTag;
             }
             else
             {
@@ -137,8 +263,8 @@ namespace TerraStorage.Common
 
             // Preserve full tag when item has GlobalItem data (e.g. enchantments from other mods)
             // so subsequent Save() calls faithfully re-serialize all per-instance data.
-            if (tag.ContainsKey("globalData") || stored.ModData != null)
-                stored.FullItemTag = tag;
+            if (StackIdentity.MustPreserveFullTag(stored.ModData != null, tag.ContainsKey("globalData")))
+                stored.FullItemTag = loadableTag;
 
             return stored;
         }

@@ -53,6 +53,16 @@ namespace TerraStorage.Tests
 
         public bool IsStationSatisfied(int tile) => _stations.Contains(tile);
 
-        public bool ConditionsMet(CoreRecipe recipe) => true;
+        // Recipe conditions are live world state in the real environment (night, biome, downed
+        // bosses). Tests that care about them supply a predicate; everything else sees them met.
+        private Func<CoreRecipe, bool> _conditions = _ => true;
+
+        public FakeEnvironment WithConditions(Func<CoreRecipe, bool> conditions)
+        {
+            _conditions = conditions;
+            return this;
+        }
+
+        public bool ConditionsMet(CoreRecipe recipe) => _conditions(recipe);
     }
 }

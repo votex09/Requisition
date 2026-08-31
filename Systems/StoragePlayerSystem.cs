@@ -51,9 +51,15 @@ namespace TerraStorage.Systems
 
         public IReadOnlyList<Guid> LastOpenedDiskIds => _lastOpenedDiskIds;
 
-        public void SetLastOpenedDiskIds(List<Guid> diskIds)
+        // The Terminal those disks came from. Deposits name it instead of the disk list, because a
+        // client-supplied GUID tells the server nothing about whose disk it is. The list stays for
+        // the tooltip counts and the singleplayer path, which never cross the network.
+        public int LastOpenedTerminalId { get; private set; } = -1;
+
+        public void SetLastOpenedDiskIds(List<Guid> diskIds, int terminalEntityId)
         {
             _lastOpenedDiskIds = diskIds ?? new List<Guid>();
+            LastOpenedTerminalId = terminalEntityId;
         }
 
         public static StoragePlayerSystem Local => Main.LocalPlayer.GetModPlayer<StoragePlayerSystem>();
@@ -68,6 +74,15 @@ namespace TerraStorage.Systems
         }
 
         public IReadOnlyCollection<int> FavoritedRecipes => _favoritedRecipes;
+
+        // Changes whenever the favorited-recipes set changes. UI caches (the Favorited Recipes
+        // panel's row cache) poll this instead of re-walking the set every frame. Drawn from a
+        // process-global counter, never a per-instance one: the consuming cache outlives the
+        // player instance, and a per-instance counter would hand every character's LoadData the
+        // same value — a character switch would then never invalidate the cache.
+        public long FavoritesVersion { get; private set; }
+
+        private static long _favoritesVersionCounter;
 
         // Toggles the favorite state of an item. Uses a remove-first pattern:
         // if the key was already present it gets removed, otherwise it is added.
@@ -84,6 +99,7 @@ namespace TerraStorage.Systems
             if (!RecipeIndexLookup.TryGetValue(recipe, out int idx)) return;
             if (!_favoritedRecipes.Remove(idx))
                 _favoritedRecipes.Add(idx);
+            FavoritesVersion = System.Threading.Interlocked.Increment(ref _favoritesVersionCounter);
         }
 
         public override void OnEnterWorld()
@@ -133,7 +149,7 @@ namespace TerraStorage.Systems
             if (Main.netMode == NetmodeID.MultiplayerClient)
             {
                 var mod = ModLoader.GetMod("TerraStorage");
-                NetworkHandler.SendDepositItem(mod, _lastOpenedDiskIds, item);
+                NetworkHandler.SendDepositItem(mod, LastOpenedTerminalId, item);
                 inventory[slot].TurnToAir();
             }
             else
@@ -223,6 +239,7 @@ namespace TerraStorage.Systems
 
             _starterGiven = tag.GetBool("starterGiven");
             CraftingTreeAutoMinimize = !tag.ContainsKey("craftingTreeAutoMin") || tag.GetBool("craftingTreeAutoMin");
+            FavoritesVersion = System.Threading.Interlocked.Increment(ref _favoritesVersionCounter);
         }
     }
 }
