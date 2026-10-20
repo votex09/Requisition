@@ -60,6 +60,9 @@ namespace TerraStorage.Systems
         //position. Server resolves the network and range-checks the player (the not-open trust
         //model, mirroring QuickStackToStorage). Appended last to keep existing byte values stable.
         DepositItemAtPosition,
+
+        //Server → client: full Crafting Core slot contents, sent to correct a refused station insert.
+        SyncCraftingCore,
     }
 
     // Sends and receives all Requisition network packets.
@@ -153,6 +156,9 @@ namespace TerraStorage.Systems
                     break;
                 case PacketType.DepositItemAtPosition:
                     HandleDepositItemAtPosition(mod, reader, whoAmI);
+                    break;
+                case PacketType.SyncCraftingCore:
+                    HandleSyncCraftingCore(reader);
                     break;
             }
         }
@@ -367,7 +373,12 @@ namespace TerraStorage.Systems
             packet.Send();
         }
 
-        public static void SendSyncStationRemove(Mod mod, int entityId, int slot)
+        // routeToInventory says where the server should put the station it takes out, the same as
+        // SendSyncDiskRemove. The client no longer takes the item itself: two players clicking the
+        // same slot each kept a copy, because the server cleared the slot without asking whether it
+        // still held anything.
+        public static void SendSyncStationRemove(Mod mod, int entityId, int slot,
+            bool routeToInventory = true)
         {
             if (Main.netMode == NetmodeID.SinglePlayer)
                 return;
@@ -376,6 +387,7 @@ namespace TerraStorage.Systems
             packet.Write((byte)PacketType.SyncStationRemove);
             packet.Write(entityId);
             packet.Write(slot);
+            packet.Write(routeToInventory);
             packet.Send();
         }
 
@@ -389,48 +401,140 @@ namespace TerraStorage.Systems
             if (slot < 0 || slot >= CraftingCoreEntity.StationSlotCount)
                 return;
 
-            if (Terraria.DataStructures.TileEntity.ByID.TryGetValue(entityId, out var entity)
-                && entity is CraftingCoreEntity cce)
+            Terraria.DataStructures.TileEntity.ByID.TryGetValue(entityId, out var entity);
+            var cce = entity as CraftingCoreEntity;
+
+            if (Main.netMode != NetmodeID.Server)
             {
-                cce.EnsureSlotsInitialized();
-                cce.StationSlots[slot] = item;
+                if (cce != null)
+                {
+                    cce.EnsureSlotsInitialized();
+                    cce.StationSlots[slot] = item;
+                }
+                return;
             }
 
-            if (Main.netMode == NetmodeID.Server)
+            // The sender has already moved the item into its own copy of the core, so every refusal
+            // below hands it back. Overwriting an occupied slot used to destroy whatever another
+            // player had put there a moment earlier.
+            if (cce == null)
             {
-                var packet = mod.GetPacket();
-                packet.Write((byte)PacketType.SyncStationInsert);
-                packet.Write(entityId);
-                packet.Write(slot);
-                ItemIO.Send(item, packet, true);
-                packet.Send(-1, whoAmI);
+                RefuseStationInsert(mod, whoAmI, null, item, StorageOperationFailure.CraftingCoreNotFound);
+                return;
             }
+
+            if (!SenderIsAtBlock(whoAmI, cce.Position))
+            {
+                RefuseStationInsert(mod, whoAmI, cce, item, StorageOperationFailure.NotAtCraftingCore);
+                return;
+            }
+
+            cce.EnsureSlotsInitialized();
+            if (!cce.InsertStation(item, slot))
+            {
+                RefuseStationInsert(mod, whoAmI, cce, item, StorageOperationFailure.CraftingCoreSlotUnavailable);
+                return;
+            }
+
+            var packet = mod.GetPacket();
+            packet.Write((byte)PacketType.SyncStationInsert);
+            packet.Write(entityId);
+            packet.Write(slot);
+            ItemIO.Send(cce.StationSlots[slot], packet, true);
+            packet.Send(-1, whoAmI);
         }
 
         private static void HandleSyncStationRemove(Mod mod, BinaryReader reader, int whoAmI)
         {
             int entityId = reader.ReadInt32();
             int slot = reader.ReadInt32();
+            bool routeToInventory = reader.ReadBoolean();
 
             // Fixed-size array, index off the wire — see HandleSyncStationInsert.
-            if (slot < 0 || slot >= CraftingCoreEntity.StationSlotCount)
+            if (slot < 0 || slot >= CraftingCoreEntity.StationSlotCount
+                || !Terraria.DataStructures.TileEntity.ByID.TryGetValue(entityId, out var entity)
+                || entity is not CraftingCoreEntity cce)
                 return;
 
+            cce.EnsureSlotsInitialized();
+
+            if (Main.netMode != NetmodeID.Server)
+            {
+                // The relay. The sender is included in it, because it no longer clears its own slot.
+                cce.StationSlots[slot] = new Item();
+                cce.StationSlots[slot].TurnToAir();
+                return;
+            }
+
+            if (!SenderIsAtBlock(whoAmI, cce.Position))
+            {
+                SendSyncCraftingCore(mod, cce, whoAmI);
+                RefuseOperation(mod, whoAmI, StorageOperationFailure.NotAtCraftingCore);
+                return;
+            }
+
+            // Already empty: another player's removal got here first, and that player has the item.
+            var removed = cce.RemoveStation(slot);
+            if (removed.IsAir)
+                return;
+
+            SendReturnItemToClient(mod, whoAmI, removed, routeToInventory);
+
+            var packet = mod.GetPacket();
+            packet.Write((byte)PacketType.SyncStationRemove);
+            packet.Write(entityId);
+            packet.Write(slot);
+            packet.Write(routeToInventory);
+            packet.Send(-1, -1);
+        }
+
+        // Turn away a station insert without costing the sender the item. Mirrors RefuseInsert:
+        // correct the sender's copy of the core, say why, and hand the item back - but only an item
+        // that could have been a station, so a forged packet cannot be used to conjure anything else.
+        private static void RefuseStationInsert(Mod mod, int toClient, CraftingCoreEntity core, Item item,
+            StorageOperationFailure failure)
+        {
+            if (core != null)
+                SendSyncCraftingCore(mod, core, toClient);
+
+            RefuseOperation(mod, toClient, failure);
+
+            if (!CraftingCoreEntity.IsValidStation(item))
+                return;
+
+            SendReturnItemToClient(mod, toClient, item);
+        }
+
+        public static void SendSyncCraftingCore(Mod mod, CraftingCoreEntity core, int toClient = -1)
+        {
+            if (Main.netMode != NetmodeID.Server) return;
+            core.EnsureSlotsInitialized();
+            var packet = mod.GetPacket();
+            packet.Write((byte)PacketType.SyncCraftingCore);
+            packet.Write(core.ID);
+            for (int i = 0; i < CraftingCoreEntity.StationSlotCount; i++)
+                ItemIO.Send(core.StationSlots[i] ?? new Item(), packet, true);
+            packet.Send(toClient);
+        }
+
+        private static void HandleSyncCraftingCore(BinaryReader reader)
+        {
+            // Server → client only, for the same reason as HandleSyncDriveBay.
+            if (Main.netMode != NetmodeID.MultiplayerClient) return;
+
+            int entityId = reader.ReadInt32();
+            var items = new Item[CraftingCoreEntity.StationSlotCount];
+            for (int i = 0; i < items.Length; i++)
+                items[i] = ItemIO.Receive(reader, true);
+
+            // Written into the existing entity rather than replacing it, so an open Crafting Core
+            // panel holding a reference to it sees the correction.
             if (Terraria.DataStructures.TileEntity.ByID.TryGetValue(entityId, out var entity)
                 && entity is CraftingCoreEntity cce)
             {
                 cce.EnsureSlotsInitialized();
-                cce.StationSlots[slot] = new Item();
-                cce.StationSlots[slot].TurnToAir();
-            }
-
-            if (Main.netMode == NetmodeID.Server)
-            {
-                var packet = mod.GetPacket();
-                packet.Write((byte)PacketType.SyncStationRemove);
-                packet.Write(entityId);
-                packet.Write(slot);
-                packet.Send(-1, whoAmI);
+                for (int i = 0; i < items.Length; i++)
+                    cce.StationSlots[i] = items[i];
             }
         }
 

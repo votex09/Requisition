@@ -194,6 +194,15 @@ namespace TerraStorage.Content.UI
                 {
                     if (!_entity.StationSlots[i].IsAir)
                     {
+                        // The server hands the station over, as it does for a Drive Bay disk:
+                        // taking it here first let two players each keep a copy of one item.
+                        if (Main.netMode == NetmodeID.MultiplayerClient)
+                        {
+                            NetworkHandler.SendSyncStationRemove(mod, _entity.ID, i, routeToInventory: false);
+                            SoundEngine.PlaySound(SoundID.Grab);
+                            return;
+                        }
+
                         Main.mouseItem = _entity.StationSlots[i].Clone();
                         _entity.StationSlots[i].TurnToAir();
                         SoundEngine.PlaySound(SoundID.Grab);
@@ -204,6 +213,15 @@ namespace TerraStorage.Content.UI
                 {
                     if (!_entity.StationSlots[i].IsAir)
                     {
+                        // Same reason as the cursor path above; the server routes it into the
+                        // inventory and falls back to the cursor when that is full.
+                        if (Main.netMode == NetmodeID.MultiplayerClient)
+                        {
+                            NetworkHandler.SendSyncStationRemove(mod, _entity.ID, i, routeToInventory: true);
+                            SoundEngine.PlaySound(SoundID.Grab);
+                            return;
+                        }
+
                         var item = _entity.StationSlots[i].Clone();
                         // Directly place item in inventory instead of using ground pickup logic
                         bool placedInInventory = false;
