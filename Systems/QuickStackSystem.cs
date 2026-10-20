@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using Terraria;
 using Terraria.DataStructures;
+using TerraStorage.Common;
 using TerraStorage.Content.Tiles;
 using TerraStorage.Helpers;
 
@@ -8,10 +9,6 @@ namespace TerraStorage.Systems
 {
     internal static class QuickStackSystem
     {
-        private const float RangeTiles = 15f;
-        private const float RangePixels = RangeTiles * 16f;
-        private const float RangeSq = RangePixels * RangePixels;
-
         internal static void OnQuickStackAllChests(On_Player.orig_QuickStackAllChests orig, Player self)
         {
             orig(self);
@@ -60,13 +57,13 @@ namespace TerraStorage.Systems
             var results = new List<TerminalEntity>();
             foreach (var kvp in TileEntity.ByID)
             {
-                if (kvp.Value is TerminalEntity terminal)
-                {
-                    float dx = player.Center.X - (terminal.Position.X * 16f + 24f);
-                    float dy = player.Center.Y - (terminal.Position.Y * 16f + 24f);
-                    if (dx * dx + dy * dy <= RangeSq)
-                        results.Add(terminal);
-                }
+                // The same rule the server applies to the packet this produces. Measured from the
+                // Terminal's stored position rather than its centre, because the client picking a
+                // Terminal the server then refuses is the whole point of having one encoding.
+                if (kvp.Value is TerminalEntity terminal
+                    && TerminalReach.IsWithinRange(player.Center.X, player.Center.Y,
+                        terminal.Position.X, terminal.Position.Y))
+                    results.Add(terminal);
             }
             return results;
         }

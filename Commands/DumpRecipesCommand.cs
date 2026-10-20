@@ -46,9 +46,16 @@ namespace TerraStorage.Commands
             sb.AppendLine("STATIONS: " + string.Join(" ", stations));
             sb.AppendLine("CONDITIONS: " + string.Join(" ", conditions.Select(c => c.ToString())));
 
+            // "type count" is the format the tests parse; everything after the '#' is for a reader.
+            // Item type ids are assigned at load time, so a dump without names cannot be read back
+            // against anyone else's mod list.
             sb.AppendLine("STORAGE:");
             foreach (var kvp in counts)
-                sb.AppendLine($"{kvp.Key} {kvp.Value}");
+            {
+                sb.Append(kvp.Key).Append(' ').Append(kvp.Value)
+                  .Append("  # ").Append(Lang.GetItemNameValue(kvp.Key))
+                  .AppendLine();
+            }
 
             sb.AppendLine("GROUPS:");
             foreach (var kvp in RecipeGroup.recipeGroups)
@@ -66,10 +73,16 @@ namespace TerraStorage.Commands
                     .Select(it => $"{it.type}:{it.stack}");
                 var tiles = r.requiredTile.Where(t => t >= 0);
 
+                var ingredientNames = r.requiredItem
+                    .Where(it => it != null && it.type > ItemID.None)
+                    .Select(it => $"{it.stack}x {Lang.GetItemNameValue(it.type)}");
+
                 sb.Append(r.createItem.type).Append(':').Append(r.createItem.stack)
                   .Append(" | ").Append(string.Join(",", ings))
                   .Append(" | tiles:").Append(string.Join(",", tiles))
                   .Append(" | groups:").Append(string.Join(",", r.acceptedGroups))
+                  .Append("  # ").Append(Lang.GetItemNameValue(r.createItem.type))
+                  .Append(" <- ").Append(string.Join(" + ", ingredientNames))
                   .AppendLine();
             }
 

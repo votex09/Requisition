@@ -4,14 +4,13 @@ using Terraria;
 using Terraria.DataStructures;
 using Terraria.ModLoader;
 using Terraria.UI;
+using TerraStorage.Common;
 using TerraStorage.Content.Tiles;
 
 namespace TerraStorage.Content.UI
 {
     public class DriveBayUISystem : ModSystem
     {
-        private const float MaxInteractDistance = 15f; // tiles
-
         private UserInterface _userInterface;
         private DriveBayUIState _uiState;
         private bool _isOpen;
@@ -123,12 +122,6 @@ namespace TerraStorage.Content.UI
 
         public DriveBayEntity OpenEntity => _isOpen ? _uiState?.Entity : null;
 
-        public override void PreUpdatePlayers()
-        {
-            if (!Main.dedServ && IsMouseOverPanel())
-                Main.LocalPlayer.mouseInterface = true;
-        }
-
         public override void UpdateUI(GameTime gameTime)
         {
             if (_isOpen)
@@ -139,9 +132,10 @@ namespace TerraStorage.Content.UI
                     return;
                 }
 
-                var playerTilePos = Main.LocalPlayer.Center / 16f;
-                float dist = Vector2.Distance(playerTilePos, _entityTilePos.ToVector2());
-                if (dist > MaxInteractDistance)
+                // The same rule the server applies to the disk insert and remove packets this panel
+                // sends, so it cannot stay open over a band where they are all refused.
+                if (!TerminalReach.IsWithinRange(Main.LocalPlayer.Center.X, Main.LocalPlayer.Center.Y,
+                        _entityTilePos.X, _entityTilePos.Y))
                 {
                     CloseDriveBay();
                     return;

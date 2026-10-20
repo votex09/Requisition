@@ -115,6 +115,20 @@ namespace TerraStorage.Content.UI
             SoundEngine.PlaySound(SoundID.MenuTick);
         }
 
+        public override void OnWorldUnload()
+        {
+            // The panel and its caches live for the whole session; the next world/character can
+            // present the same version stamps, so staleness must be forced out here.
+            _panel?.ResetCaches();
+        }
+
+        public override void OnWorldLoad()
+        {
+            // Symmetric reset: an abrupt multiplayer disconnect may skip OnWorldUnload, and
+            // world-load is the one hook guaranteed to run before anything draws in the new world.
+            _panel?.ResetCaches();
+        }
+
         public override void UpdateUI(GameTime gameTime)
         {
             if (Main.dedServ) return;

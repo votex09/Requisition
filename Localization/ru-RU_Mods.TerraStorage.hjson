@@ -158,6 +158,11 @@ Configs: {
 			// Tooltip: Show 'In Storage: X' on item tooltips when a Terminal has been opened
 			// Label: In Storage Tooltip
 		}
+
+		GridScrollRows: {
+			// Tooltip: How many rows one mouse wheel notch scrolls in the item, recipe, NPC and disk panes (1-255)
+			// Label: Grid Scroll Rows
+		}
 	}
 }
 
@@ -262,5 +267,30 @@ UI: {
 	VacuumBags: {
 		DepositButton: Сложить в Requisition
 		NoNetwork: Поблизости нет хранилища Requisition.
+	}
+
+	OperationFailed: {
+		Prefix: "Requisition: "
+		Unspecified: сеть хранилища отклонила эту операцию.
+		RecipeNotFeasible: этот рецепт нельзя создать из того, что может выдать сеть.
+		NoRoomInInventory: в вашем инвентаре нет места для результата.
+		NoRoomInStorageOrInventory: ни в хранилище, ни в инвентаре нет места для результата.
+		CraftCostingNoLongerHolds: крафт отменён — в хранилище больше нет того, из чего был рассчитан план.
+		NothingWithdrawn: хранилище не смогло выдать этот предмет.
+		NothingDeposited: хранилище не приняло этот предмет.
+		NothingQuickStacked: ничто в вашем инвентаре не совпало с тем, что уже есть в хранилище.
+		NoStorageInRange: вы слишком далеко от Крафтового терминала.
+		NoStorageConnected: к этому терминалу не подключены диски хранения.
+		NoTerminalFound: этого Крафтового терминала больше нет.
+		NotAtDriveBay: вы слишком далеко от этого Дискового отсека.
+		DiskNotInSlot: в этой ячейке больше нет этого диска.
+		UpgradeUnavailable: для этого диска нет доступного улучшения.
+		MaterialsNoLongerAvailable: в хранилище больше нет материалов для этого улучшения.
+		DiskNotFound: этого Дискового отсека больше нет.
+		DiskRecoveryRefused: этот диск нельзя восстановить на запасной диск, который вы держите.
+		NothingToDefragment: дефрагментировать было нечего.
+		DiskClaimRefused: этот диск принадлежит другому игроку.
+		DriveBaySlotUnavailable: эта ячейка Дискового отсека была занята раньше.
+		DriveBayNotOnNetwork: этот Дисковый отсек не подключён к этому терминалу.
 	}
 }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using Terraria;
@@ -26,6 +27,13 @@ namespace TerraStorage.Content.UI.Elements
         // Height reserved at the bottom of the detail pane for the upgrade section.
         // Sized for up to 3 ingredient rows + button + header.
         private const int UpgradeSectionHeight = 130;
+        private const int MaxTierUpgradeSectionHeight = 30;
+        private const int DefragButtonHeight = 28;
+        private const float UsageBarOffset = 40f;
+        private const float ContentsLabelOffset = 14f;
+        private const float ContentsGridGap = 18f;
+        private const float ContentsGridBottomPadding = 10f;
+        private const float DiskListBottomPadding = 6f;
 
         private static readonly RasterizerState ScissorRasterizer = new() { ScissorTestEnable = true };
 
@@ -35,6 +43,28 @@ namespace TerraStorage.Content.UI.Elements
 
         private static (int itemType, int count)[][] GetUpgradeOptions(DiskTier tier)
             => StorageDiskBase.GetUpgradeOptions(tier);
+
+        private float GetContentsGridTopOffset()
+            => UsageBarOffset + ContentsLabelOffset + ContentsGridGap;
+
+        private static bool IsMaxTier(DiskTier tier) => !StorageDiskBase.HasUpgradePath(tier);
+
+        private float GetUpgradeSectionHeight(DiskTier tier)
+        {
+            bool isMaxTier = IsMaxTier(tier);
+
+            return isMaxTier ? MaxTierUpgradeSectionHeight : UpgradeSectionHeight;
+        }
+
+        private float GetContentsGridHeight(float panelHeight, DiskTier tier)
+            => panelHeight - GetContentsGridTopOffset() - GetUpgradeSectionHeight(tier)
+               - ContentsGridBottomPadding;
+
+        private int GetContentsGridColumns(float paneWidth)
+            => Math.Max(1, (int)(paneWidth / ItemCellSize));
+
+        private float GetDiskListHeight(float panelHeight)
+            => panelHeight - DefragButtonHeight - DiskListBottomPadding;
 
         private static int GetDiskItemType(DiskTier tier)
             => StorageDiskBase.GetItemTypeForTier(tier);
@@ -122,10 +152,39 @@ namespace TerraStorage.Content.UI.Elements
         public override void Update(GameTime gameTime)
         {
             base.Update(gameTime);
-            // Lerp list scroll
+
+            var dims = GetInnerDimensions();
+
+            float listHeight    = GetDiskListHeight(dims.Height);
+            int visibleDiskRows = Math.Max(1, (int)(listHeight / DiskRowHeight));
+            int hiddenDiskRows  = Math.Max(0, _disks.Count - visibleDiskRows);
+            float maxListScroll = hiddenDiskRows * DiskRowHeight;
+
+            _listScrollTarget = Math.Clamp(_listScrollTarget, 0, maxListScroll);
+
             _listScrollPixels += (_listScrollTarget - _listScrollPixels) * 0.15f;
             if (Math.Abs(_listScrollPixels - _listScrollTarget) < 0.5f)
                 _listScrollPixels = _listScrollTarget;
+            _listScrollPixels = Math.Clamp(_listScrollPixels, 0, maxListScroll);
+
+            int maxContentsScroll = GetMaximumContentsScroll(dims);
+            _contentsScroll = Math.Clamp(_contentsScroll, 0, maxContentsScroll);
+        }
+
+        private int GetMaximumContentsScroll(CalculatedStyle dims)
+        {
+            if (_selectedIndex < 0 || _selectedIndex >= _disks.Count)
+                return 0;
+
+            var disk        = _disks[_selectedIndex].Disk;
+            var items       = GetDetailItems(disk.DiskId);
+            float rightW    = dims.Width - ListPaneWidth - 8;
+            int columns     = GetContentsGridColumns(rightW);
+            float gridH     = GetContentsGridHeight(dims.Height, disk.Tier);
+            int visibleRows = Math.Max(1, (int)(gridH / ItemCellSize));
+            int totalRows   = (items.Count + columns - 1) / columns;
+
+            return Math.Max(0, totalRows - visibleRows);
         }
 
         // ---- Helpers -------------------------------------------------------
@@ -165,8 +224,9 @@ namespace TerraStorage.Content.UI.Elements
 
             // Disk list (left pane).
             var dims = GetInnerDimensions();
+            float listHeight = GetDiskListHeight(dims.Height);
             if (pos.X >= dims.X && pos.X < dims.X + ListPaneWidth &&
-                pos.Y >= dims.Y && pos.Y < dims.Y + dims.Height)
+                pos.Y >= dims.Y && pos.Y < dims.Y + listHeight)
             {
                 int row = (int)((pos.Y - dims.Y + _listScrollPixels) / DiskRowHeight);
                 if (row >= 0 && row < _disks.Count && row != _selectedIndex)
@@ -182,29 +242,17 @@ namespace TerraStorage.Content.UI.Elements
         {
             base.ScrollWheel(evt);
 
-            var dims  = GetInnerDimensions();
-            int delta = -evt.ScrollWheelValue / 120;
+            var dims    = GetInnerDimensions();
+            float notches = -evt.ScrollWheelValue / 120f;
 
             if (Main.MouseScreen.X < dims.X + ListPaneWidth)
             {
-                // Scroll disk list (pixel-based).
-                int visible       = Math.Max(1, (int)(dims.Height / DiskRowHeight));
-                int maxScrollRows = Math.Max(0, _disks.Count - visible);
-                _listScrollTarget = Math.Clamp(_listScrollTarget + delta * DiskRowHeight,
-                    0, maxScrollRows * DiskRowHeight);
+                _listScrollTarget += notches * DiskRowHeight;
             }
             else if (_selectedIndex >= 0 && _selectedIndex < _disks.Count)
             {
-                // Scroll contents grid on the right pane.
-                var disk  = _disks[_selectedIndex].Disk;
-                var items = GetDetailItems(disk.DiskId);
-                float rightW    = dims.Width - ListPaneWidth - 8;
-                int   cols      = Math.Max(1, (int)(rightW / ItemCellSize));
-                float gridH     = dims.Height - 70f - UpgradeSectionHeight - 10f;
-                int visibleRows = Math.Max(1, (int)(gridH / ItemCellSize));
-                int totalRows   = (items.Count + cols - 1) / cols;
-                int maxScroll   = Math.Max(0, totalRows - visibleRows);
-                _contentsScroll = Math.Clamp(_contentsScroll + delta, 0, maxScroll);
+                int gridScrollRows = RequisitionClientConfig.GetGridScrollRows();
+                _contentsScroll += notches * gridScrollRows;
             }
         }
 
@@ -255,8 +303,10 @@ namespace TerraStorage.Content.UI.Elements
                 bool craftable = false;
                 if (have < need)
                 {
-                    var plan = RecipeResolver.Resolve(itemType, need - have, _diskIds, _stations, _conditions);
-                    craftable = plan != null && plan.IsFeasible;
+                    // Resolve the FULL need: asking for `need - have` lets the resolver count the
+                    // stock we just subtracted a second time and call it a free direct extract.
+                    var plan = RecipeResolver.Resolve(itemType, need, _diskIds, _stations, _conditions);
+                    craftable = plan is { IsFeasible: true } && plan.Steps.Count > 0;
                 }
                 result.Add(new IngredientState { ItemType = itemType, Need = need, Have = have, Craftable = craftable });
             }
@@ -276,26 +326,18 @@ namespace TerraStorage.Content.UI.Elements
             if (Main.netMode == NetmodeID.MultiplayerClient)
             {
                 var mod = ModLoader.GetMod("TerraStorage");
-                NetworkHandler.SendUpgradeDiskRequest(mod, entry.Bay.ID, entry.Slot, guid,
-                    _diskIds, _ingCacheOptionIdx, _stations, _conditions);
+                NetworkHandler.SendUpgradeDiskRequest(mod, _terminal.ID, entry.Bay.ID, entry.Slot,
+                    guid, _ingCacheOptionIdx);
                 Terraria.Audio.SoundEngine.PlaySound(SoundID.Grab);
                 return;
             }
 
-            // For each ingredient: craft any shortfall first, then consume from storage.
-            foreach (var s in _ingredientStates)
+            // All-or-nothing: the upgrade is only installed if every material was actually consumed.
+            var materials = _ingredientStates.Select(s => (s.ItemType, s.Need));
+            if (!RecipeResolver.TryConsumeMaterials(_diskIds, materials, _stations, _conditions))
             {
-                if (s.Have < s.Need)
-                {
-                    var plan = RecipeResolver.Resolve(s.ItemType, s.Need - s.Have, _diskIds, _stations, _conditions);
-                    if (plan != null && plan.IsFeasible)
-                    {
-                        var crafted = RecipeResolver.ExecutePlan(plan, _diskIds);
-                        if (!crafted.IsAir)
-                            StorageWorldSystem.Instance.InsertItem(_diskIds, crafted);
-                    }
-                }
-                StorageWorldSystem.Instance.ExtractItem(_diskIds, s.ItemType, s.Need);
+                Refresh();
+                return;
             }
 
             // Build the upgraded disk item and carry the existing GUID across.
@@ -322,7 +364,7 @@ namespace TerraStorage.Content.UI.Elements
             if (Main.netMode == NetmodeID.MultiplayerClient)
             {
                 var mod = ModLoader.GetMod("TerraStorage");
-                NetworkHandler.SendDefragRequest(mod, _diskIds);
+                NetworkHandler.SendDefragRequest(mod, _terminal.ID);
                 return;
             }
 
@@ -339,8 +381,9 @@ namespace TerraStorage.Content.UI.Elements
             float rightX  = dims.X + ListPaneWidth + 8;
             float rightW  = dims.Width - ListPaneWidth - 8;
 
-            const float defragBtnH = 28f;
-            DrawDiskList(sb, dims.X, dims.Y, dims.Height - defragBtnH - 6f);
+            const float defragBtnH = DefragButtonHeight;
+
+            DrawDiskList(sb, dims.X, dims.Y, GetDiskListHeight(dims.Height));
 
             // Defragment button at the bottom of the left pane.
             bool canDefrag = _disks.Count > 1;
@@ -448,8 +491,8 @@ namespace TerraStorage.Content.UI.Elements
                 return;
             }
 
-            bool    isMaxTier = GetUpgradeOptions(entry.Disk.Tier) == null;
-            float   upgradeH  = isMaxTier ? 30f : UpgradeSectionHeight;
+            bool    isMaxTier = IsMaxTier(entry.Disk.Tier);
+            float   upgradeH  = GetUpgradeSectionHeight(entry.Disk.Tier);
             var     tierColor = entry.Disk.Tier.GetColor();
 
             // Header: name + slot count.
@@ -460,7 +503,7 @@ namespace TerraStorage.Content.UI.Elements
 
             // Usage bar: track is 1px larger on all sides than the fill.
             const int fillH = 8;
-            float barY   = y + 40f;
+            float barY   = y + UsageBarOffset;
             float barW   = width - 10f;
             float fill   = data.MaxStacks > 0 ? (float)data.UsedStacks / data.MaxStacks : 0f;
             sb.Draw(TextureAssets.MagicPixel.Value, new Rectangle((int)x - 1, (int)barY - 1, (int)barW + 2, fillH + 2), new Color(23, 33, 69));
@@ -468,12 +511,12 @@ namespace TerraStorage.Content.UI.Elements
                 sb.Draw(TextureAssets.MagicPixel.Value, new Rectangle((int)x, (int)barY, (int)(barW * fill), fillH), tierColor);
 
             // Contents label and grid.
-            float labelY  = barY + 14f;
+            float labelY  = barY + ContentsLabelOffset;
             Utils.DrawBorderString(sb, Language.GetTextValue("Mods.TerraStorage.UI.DiskPanel.Contents"), new Vector2(x, labelY), Color.White, 0.75f);
 
-            float gridY = labelY + 18f;
-            float gridH = height - (gridY - y) - upgradeH - 10f;
-            int   cols  = Math.Max(1, (int)(width / ItemCellSize));
+            float gridY = labelY + ContentsGridGap;
+            float gridH = GetContentsGridHeight(height, entry.Disk.Tier);
+            int   cols  = GetContentsGridColumns(width);
             var   items = GetDetailItems(entry.Disk.DiskId);
             DrawContentsGrid(sb, x, gridY, width, gridH, cols, items);
 

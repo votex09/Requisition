@@ -5,12 +5,28 @@
 - **Lock Recipe toggle** — checkbox in the crafting panel pins crafting to the exact selected recipe variant instead of auto-picking one, so it won't switch recipes mid mass-craft
 - **androLib (Vacuum Bags) support** — optional "Deposit to Requisition" button on vacuum bag UIs that empties the bag into a Terminal's network in range (only appears when androLib is installed)
 - **`/tsdump` command** — diagnostic chat command that dumps the recipe graph and current storage to a file for performance analysis
+- **Grid Scroll Rows setting** — client config option (1-255, default 3) for how many rows one mouse wheel notch scrolls in the item, recipe, NPC and disk panes; the default is tuned to match Terraria's own scroll speed
 
 ### Changed
 - Held items can now be dropped anywhere in the Storage tab, including empty grid slots
 - Ingredients you lack but can sub-craft now show in **orange** as `12/12` instead of a misleading red `0/12`
 
 ### Fixed
+- **Withdrawing a stack no longer strips enchantments and modifiers off it.** When a cell held the same item under two different per-instance states — an enchanted copy and a plain one, or a reforged and an unreforged one — taking the lot handed back items carrying neither, so every enchantment and modifier in that cell was gone. A withdrawal now stops where the state changes and hands over that run intact. **The trade-off is clicks:** such a cell now comes out a run at a time, so emptying it can take several clicks instead of one, and how much the first click gives you depends on how the cell happens to be laid out. Crafting is unaffected — a recipe still draws everything it needs in one go
+- **Multiplayer: another player can no longer empty your storage from across the world.** Every storage action used to tell the server which disks to take from, and the server took its word for it — disk identifiers are sent to every client, so a modified client could name any disk anywhere and drain it without ever leaving its base. Withdrawing, depositing, crafting, defragmenting and disk upgrades now name the Terminal you are standing at (or holding a Remote Terminal for), and the server works out the disks itself
+- **Multiplayer: Defragment now works through a Remote Terminal.** It was the one action already restricted by distance, so pressing Defragment from a Remote Terminal did nothing at all, without saying so
+- **Multiplayer: a modified client can no longer craft with stations it does not have.** Crafting and disk upgrades used to send the list of available crafting stations along with the request; the server now reads them from the Crafting Cores around the Terminal
+- **Multiplayer: Drive Bay slots can no longer be emptied or filled from a distance.** A forged packet could clear any Drive Bay slot in the world, destroying the disk in it. Taking a disk out now waits for the server to hand it over, so a refusal can never leave you holding a copy of a disk that is also still in the bay
+- **Multiplayer: disk management now tells you why it refused.** Disk upgrades, disk recovery, defragment, archiving, and inserting or removing a disk in a Drive Bay all used to fail in complete silence — twenty separate cases. Each now names its reason in chat
+- **A deposit that the server refuses now hands the item back** instead of leaving it nowhere
+- Being just inside the range the Terminal and Drive Bay panels allow no longer means the server refuses everything you do. The panel measured from the block's corner and the server from its centre, so on two sides there was a band where the window stayed open and every action silently failed
+- Empty disk entries no longer accumulate in the world file each time a disk is taken out of a Drive Bay and put back — in singleplayer as well as on a server
+- Every deposit, withdrawal, craft and quick-stack used to copy the contents of **every** disk in the world before running, so servers got slower as more disks existed anywhere on the map. Each operation now copies only the disks of the Terminal it came from
+- **An aborted craft no longer destroys an item you owned.** When a multi-step craft could not be paid for and rolled back, it worked out which units it had created by their position in the ledger — so if the item it made landed on an earlier disk than a copy you already owned, the rollback kept its own copy and destroyed yours. Affected items carrying per-instance state (enchantments, mod data); the count always balanced, which is why it went unnoticed
+- Clicking the selected recipe a second time and then CRAFT no longer throws (single player) or does nothing (multiplayer) — deselecting now clears the plan the craft button reads
+- **Multiplayer: a refused storage action now tells you why.** Crafting, withdrawing, depositing or quick-stacking on a server used to fail in total silence — the server sent a yes/no the client threw away. Every refusal now names its reason in chat, in the same words singleplayer already used, and a bulk action that is refused forty times says so once instead of forty times
+- Quick-stacking into a full storage network no longer reports success and does nothing
+- Depositing with no Terminal in range, or with no disks connected, now says so instead of silently returning the item
 - Recipes no longer show as craftable when shared materials were double-counted across ingredients
 - Loop recipes (e.g. blue mushrooms) now show a red **"Nothing to Craft"** button instead of a craft button that did nothing
 - Recipe list now refreshes correctly when storage changes — no more stale or disappearing recipes after crafting or moving items
@@ -18,6 +34,11 @@
 - Ingredient counts are no longer over-counted after a partial craft
 - Eliminated Terminal hitching every couple seconds while open, and heavy lag on each craft in large modpacks (allocation-free feasibility, worklist-based reachability, targeted post-craft revalidation, and removal of a spurious storage-version bump that also starved disk backups)
 - The click that opens the Terminal no longer bleeds into the item grid as a grab (left and right click)
+- Drive Bay: a max-tier disk's contents no longer scroll past the last row into blank space, and the last disk in the bay is always reachable in the list
+- Storage, crafting and Drive Bay scroll positions now stay correct after resizing the Terminal window instead of stranding the view in blank space, and the scrollbar thumb resizes with the window
+- Crafting: the recipe scrollbar thumb no longer pins early or dead-zones at the bottom while the grid scrolls one row further
+- Defragment no longer freezes the game on a large drive bay — a full 40-disk bay went from about a third of a second to roughly one frame, and a bay packed with bulk materials from about seven tenths of a second to the same
+- Defragment: a malformed multiplayer defrag request can no longer make a disk donate to itself, exhaust server memory, or stall the server on a repeated disk
 
 ## [0.5.1]
 

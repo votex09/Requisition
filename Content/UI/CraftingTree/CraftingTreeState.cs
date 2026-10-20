@@ -105,6 +105,11 @@ namespace TerraStorage.Content.UI.CraftingTree
         private CraftingTreeNode _hoveredNode;
         private Item _tooltipItem;
 
+        // Per-open / per-selection display caches: rebuilt on state change, read per frame.
+        private string _titleText = "";
+        private int _infoRowsForType = -1;
+        private readonly List<string> _dropRowText = new();
+
         // Colors per category
         private static readonly Dictionary<ItemCategory, Color> CategoryColors = new()
         {
@@ -178,6 +183,7 @@ namespace TerraStorage.Content.UI.CraftingTree
             EnsureIndexBuilt();
 
             _rootItemType = itemType;
+            _titleText = "Crafting Tree: " + Lang.GetItemNameValue(itemType);
             _root = new CraftingTreeNode(itemType);
             _allNodes.Clear();
             _collapsingNodes.Clear();
@@ -709,9 +715,10 @@ namespace TerraStorage.Content.UI.CraftingTree
                 }
             }
 
-            // Update hovered node
+            // Update hovered node. _tooltipItem is a per-type cache (SetDefaults runs mod hooks,
+            // so once per hovered type, not once per frame); tooltip drawing is gated on
+            // _hoveredNode, so the stale cached item is inert while nothing is hovered.
             _hoveredNode = null;
-            _tooltipItem = null;
             if (mouseInPanel && !_minimized)
             {
                 Vector2 graphMouse = ScreenToGraph(mouse);
@@ -723,8 +730,11 @@ namespace TerraStorage.Content.UI.CraftingTree
                     if (nodeRect.Contains((int)graphMouse.X, (int)graphMouse.Y))
                     {
                         _hoveredNode = node;
-                        _tooltipItem = new Item();
-                        _tooltipItem.SetDefaults(node.ItemType);
+                        if (_tooltipItem == null || _tooltipItem.type != node.ItemType)
+                        {
+                            _tooltipItem = new Item();
+                            _tooltipItem.SetDefaults(node.ItemType);
+                        }
                         break;
                     }
                 }
@@ -997,11 +1007,9 @@ namespace TerraStorage.Content.UI.CraftingTree
                 new Rectangle((int)_panelX, (int)_panelY, (int)_panelWidth, (int)TitleBarHeight),
                 new Color(63, 82, 151) * 0.85f);
 
-            // Title text
-            string rootName = Lang.GetItemNameValue(_rootItemType);
-            string title = $"Crafting Tree: {rootName}";
-            var titleSize = FontAssets.MouseText.Value.MeasureString(title) * 0.6f;
-            Utils.DrawBorderString(spriteBatch, title,
+            // Title text (built once per OpenForItem — the root type is fixed per open)
+            var titleSize = FontAssets.MouseText.Value.MeasureString(_titleText) * 0.6f;
+            Utils.DrawBorderString(spriteBatch, _titleText,
                 new Vector2(_panelX + 10, _panelY + (TitleBarHeight - titleSize.Y) / 2f), Color.White, 0.6f);
 
             // Close button [X]
@@ -1053,7 +1061,7 @@ namespace TerraStorage.Content.UI.CraftingTree
             spriteBatch.End();
             spriteBatch.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend,
                 SamplerState.AnisotropicClamp, DepthStencilState.None,
-                new RasterizerState { ScissorTestEnable = true },
+                UIDrawHelpers.ScissorRasterizer,
                 null, Main.UIScaleMatrix);
             spriteBatch.GraphicsDevice.ScissorRectangle = clipRect;
 
@@ -1110,7 +1118,7 @@ namespace TerraStorage.Content.UI.CraftingTree
                     string expandHint;
                     if (_hoveredNode.IsSourceSide)
                     {
-                        bool hasSourceRecipes = RecipeCacheSystem.Instance.GetRecipesFor(_hoveredNode.ItemType).Count > 0;
+                        bool hasSourceRecipes = RecipeCacheSystem.Instance.HasRecipesFor(_hoveredNode.ItemType);
                         if (!hasSourceRecipes)
                             expandHint = "No crafting sources";
                         else if (_hoveredNode.IsSourceExpanded)
@@ -1279,7 +1287,7 @@ namespace TerraStorage.Content.UI.CraftingTree
                 // LEFT indicator (sources — what creates this item)
                 if (node.IsSourceSide || isRoot)
                 {
-                    bool hasSourceRecipes = RecipeCacheSystem.Instance.GetRecipesFor(node.ItemType).Count > 0;
+                    bool hasSourceRecipes = RecipeCacheSystem.Instance.HasRecipesFor(node.ItemType);
                     if (node.SourceChildrenLoaded && node.SourceChildren.Count > 0)
                     {
                         string ind = node.IsSourceExpanded ? "-" : "+";
@@ -1316,6 +1324,22 @@ namespace TerraStorage.Content.UI.CraftingTree
             var shimmerFrom = cache.GetShimmerSources(itemType);
             int shimmerTo = cache.GetShimmerResult(itemType);
 
+            // Drop-rate strings are formatted once per selected item, not per frame.
+            if (_infoRowsForType != itemType)
+            {
+                _infoRowsForType = itemType;
+                _dropRowText.Clear();
+                if (drops != null)
+                {
+                    foreach (var drop in drops)
+                    {
+                        string pct = drop.DropRate >= 1f ? "100%" : $"{drop.DropRate * 100:0.##}%";
+                        string stack = drop.StackMax > 1 ? $" ({drop.StackMin}-{drop.StackMax})" : "";
+                        _dropRowText.Add(pct + stack);
+                    }
+                }
+            }
+
             // Panel slides in from left edge
             float panelW = InfoPanelWidth;
             float panelH = contentH;
@@ -1351,7 +1375,7 @@ namespace TerraStorage.Content.UI.CraftingTree
             spriteBatch.End();
             spriteBatch.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend,
                 SamplerState.AnisotropicClamp, DepthStencilState.None,
-                new RasterizerState { ScissorTestEnable = true },
+                UIDrawHelpers.ScissorRasterizer,
                 null, Main.UIScaleMatrix);
             spriteBatch.GraphicsDevice.ScissorRectangle = new Rectangle(
                 (int)(clipLeft * Main.UIScale), (int)(clipTop * Main.UIScale),
@@ -1393,7 +1417,7 @@ namespace TerraStorage.Content.UI.CraftingTree
             float scrollClipTop = Math.Max(panelY + headerH, contentY);
             spriteBatch.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend,
                 SamplerState.AnisotropicClamp, DepthStencilState.None,
-                new RasterizerState { ScissorTestEnable = true },
+                UIDrawHelpers.ScissorRasterizer,
                 null, Main.UIScaleMatrix);
             spriteBatch.GraphicsDevice.ScissorRectangle = new Rectangle(
                 (int)(clipLeft * Main.UIScale), (int)(scrollClipTop * Main.UIScale),
@@ -1411,8 +1435,9 @@ namespace TerraStorage.Content.UI.CraftingTree
                 Utils.DrawBorderString(spriteBatch, Language.GetTextValue("Mods.TerraStorage.UI.CraftingTree.DroppedBy"), new Vector2(panelX + 8, y + 2), new Color(255, 200, 100), labelScale);
                 y += 22;
 
-                foreach (var drop in drops)
+                for (int i = 0; i < drops.Count; i++)
                 {
+                    var drop = drops[i];
                     float rowX = panelX + 6;
                     float rowY = y;
 
@@ -1423,10 +1448,8 @@ namespace TerraStorage.Content.UI.CraftingTree
 
                     // Drop text
                     string npcName = Lang.GetNPCNameValue(drop.NpcType);
-                    string pct = drop.DropRate >= 1f ? "100%" : $"{drop.DropRate * 100:0.##}%";
-                    string stack = drop.StackMax > 1 ? $" ({drop.StackMin}-{drop.StackMax})" : "";
                     Utils.DrawBorderString(spriteBatch, npcName, new Vector2(rowX + slotSize + 4, rowY + 4), new Color(220, 220, 220), textScale);
-                    Utils.DrawBorderString(spriteBatch, $"{pct}{stack}", new Vector2(rowX + slotSize + 4, rowY + 19), new Color(180, 180, 140), textScale * 0.85f);
+                    Utils.DrawBorderString(spriteBatch, _dropRowText[i], new Vector2(rowX + slotSize + 4, rowY + 19), new Color(180, 180, 140), textScale * 0.85f);
 
                     // Hover → NPC tooltip
                     if (mouseInScroll && cellRect.Contains(mouseScreen.ToPoint()))

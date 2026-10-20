@@ -1,3 +1,4 @@
+using System;
 using System.ComponentModel;
 using Newtonsoft.Json;
 using Terraria.ModLoader;
@@ -26,6 +27,21 @@ namespace TerraStorage
 
         [DefaultValue(true)]
         public bool InStorageTooltip { get; set; }
+
+        private const int MinimumGridScrollRows = 1;
+        private const int MaximumGridScrollRows = 255;
+        private const int DefaultGridScrollRows = 3;
+
+        [DefaultValue(DefaultGridScrollRows)]
+        [Range(MinimumGridScrollRows, MaximumGridScrollRows)]
+        public int GridScrollRows { get; set; }
+
+        public static int GetGridScrollRows()
+        {
+            int configuredRows = Instance?.GridScrollRows ?? DefaultGridScrollRows;
+
+            return Math.Clamp(configuredRows, MinimumGridScrollRows, MaximumGridScrollRows);
+        }
 
         [Header("CraftingTree")]
 

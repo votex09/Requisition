@@ -1,5 +1,5 @@
 displayName = Requisition
 author = _/Stixx
-version = 0.5.15
+version = 0.5.19
 weakReferences = androLib
 buildIgnore = Sources/*, Tests/*, .gitignore, .git/*, .claude/*, *.md, *.kra, *.kra~, *.png~, Backup_*.zip, SS/*, *.aseprite, *.code-workspace

@@ -477,11 +477,16 @@ namespace TerraStorage.Content.UI
                 var detailRect = new Rectangle((int)dx, (int)dy, (int)(inner.Width - DetailX), MainAreaHeight);
 
                 if (listRect.Contains(Main.MouseScreen.ToPoint()))
+                {
                     _diskScrollOffset = Math.Clamp(_diskScrollOffset + dir, 0,
                         Math.Max(0, _diskList.Count - listMaxVisible));
+                }
                 else if (_selectedDisk != null && detailRect.Contains(Main.MouseScreen.ToPoint()))
-                    _itemScrollOffset = Math.Clamp(_itemScrollOffset + dir, 0,
+                {
+                    int gridScrollRows = RequisitionClientConfig.GetGridScrollRows();
+                    _itemScrollOffset = Math.Clamp(_itemScrollOffset + dir * gridScrollRows, 0,
                         Math.Max(0, _selectedDisk.Items.Count - itemMaxVisible));
+                }
             }
 
             if (justClicked && _panel.ContainsPoint(Main.MouseScreen))

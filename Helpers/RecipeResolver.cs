@@ -396,7 +396,7 @@ namespace TerraStorage.Helpers
         {
             var core = Core(availableStations, availableConditions);
             var reachable = core.ComputeReachableTypes(available);
-            var ingCache = new Dictionary<(int ctx, int type, int stack), bool>();
+            var ingCache = new Dictionary<(int ctx, int group, int type, int stack), bool>();
             for (int i = 0; i < results.Count; i++)
                 results[i] = (results[i].recipe,
                     core.IsRecipeCraftable(TerrariaRecipeEnvironment.ToCore(results[i].recipe), reachable, available, ingCache));
@@ -415,7 +415,7 @@ namespace TerraStorage.Helpers
             Dictionary<int, int> available,
             HashSet<int> availableStations,
             HashSet<CraftingCondition> availableConditions,
-            Dictionary<(int ctx, int type, int stack), bool> ingCache,
+            Dictionary<(int ctx, int group, int type, int stack), bool> ingCache,
             out bool anyFlipped)
         {
             anyFlipped = false;
@@ -660,9 +660,77 @@ namespace TerraStorage.Helpers
             }
         }
 
-        private static void ExtractFromBoth(List<Guid> diskList, int itemType, int amount)
+        // Binds the transaction core to the live storage network. The core does the bookkeeping;
+        // this only forwards the four operations it needs.
+        private class WorldCraftingStorage : ICraftingStorage<Item>
         {
-            StorageWorldSystem.Instance.ExtractItem(diskList, itemType, amount);
+            private readonly List<Guid> _diskList;
+
+            public WorldCraftingStorage(List<Guid> diskList)
+            {
+                _diskList = diskList;
+            }
+
+            public Item Nothing => new Item();
+
+            public int CountItem(int itemType) => StorageWorldSystem.Instance.CountItem(_diskList, itemType);
+
+            public List<Item> ExtractStacks(int itemType, int amount)
+                => StorageWorldSystem.Instance.ExtractItemStacks(_diskList, itemType, amount);
+
+            public int ExtractStored(Item stored, int count)
+            {
+                Item recovered = StorageWorldSystem.Instance.ExtractStoredItem(_diskList, stored, count);
+                return recovered.IsAir ? 0 : recovered.stack;
+            }
+
+            public int Insert(Item item) => StorageWorldSystem.Instance.InsertItem(_diskList, item);
+
+            public int StackOf(Item item) => item == null || item.IsAir ? 0 : item.stack;
+
+            public Item SplitOff(Item item, int count)
+            {
+                var part = item.Clone();
+                part.stack = count;
+                item.stack -= count;
+                return part;
+            }
+
+            public bool SameStoredState(Item first, Item second)
+                => StorageWorldSystem.ItemsShareStoredState(first, second);
+        }
+
+        // Acquires every listed material, crafting shortfalls, and consumes them as one transaction:
+        // either the whole list is taken and true is returned, or nothing is consumed and everything
+        // already taken is put back. Both disk-upgrade paths (the panel in single player, the packet
+        // handler on a server) go through here so neither can install an upgrade it did not pay for.
+        //
+        // Each ingredient is resolved for its FULL need, not the shortfall. Asking the resolver for
+        // `need - have` double-counts: it rebuilds its pool from all of storage, sees the stock the
+        // caller already subtracted, and reports a direct extract with no steps — feasible, free, and
+        // wrong.
+        public static bool TryConsumeMaterials(IEnumerable<Guid> diskIds, IEnumerable<(int itemType, int count)> materials,
+            HashSet<int> availableStations, HashSet<CraftingCondition> availableConditions = null)
+        {
+            var diskList = diskIds.ToList();
+            var storage = new WorldCraftingStorage(diskList);
+
+            var consumer = new MaterialConsumer<Item>(storage,
+                (itemType, need) => CraftShortfall(itemType, need, diskList, availableStations, availableConditions));
+
+            return consumer.TryConsume(materials);
+        }
+
+        // Produces `need` of a material the network is short of. A plan with no steps is a direct
+        // extract, which cannot be right here: we are only asked once storage holds less than `need`.
+        private static Item CraftShortfall(int itemType, int need, List<Guid> diskList,
+            HashSet<int> availableStations, HashSet<CraftingCondition> availableConditions)
+        {
+            var plan = Resolve(itemType, need, diskList, availableStations, availableConditions);
+            if (plan == null || !plan.IsFeasible || plan.Steps.Count == 0)
+                return new Item();
+
+            return ExecutePlan(plan, diskList);
         }
 
         // Execute a crafting plan, consuming items from storage and player inventory,
@@ -673,64 +741,11 @@ namespace TerraStorage.Helpers
                 return new Item();
 
             var diskList = diskIds.ToList();
-            Item finalResult = new Item();
+            var storage = new WorldCraftingStorage(diskList);
+            var producer = new PlanStepProducer(plan, diskList);
 
-            for (int i = 0; i < plan.Steps.Count; i++)
-            {
-                var step = plan.Steps[i];
-                bool isFinalStep = i == plan.Steps.Count - 1;
-
-                // Detect disk upgrade steps (e.g. Tier1 → Tier2) before consuming anything.
-                // ExecutePlan bypasses Terraria's crafting pipeline entirely, so the
-                // AddOnCraftCallback registered in DiskRecipes never fires here. We must
-                // replicate the same GUID-transfer logic manually.
-                Guid sourceGuid = Guid.Empty;
-                if (IsDiskUpgradeStep(step, out int sourceDiskItemType))
-                {
-                    // Capture the source disk's GUID from storage before extraction removes it.
-                    sourceGuid = FindDiskGuidInStorage(diskList, sourceDiskItemType);
-                }
-
-                foreach (var kvp in step.Consumed)
-                    ExtractFromBoth(diskList, kvp.Key, kvp.Value);
-
-                var produced = new Item();
-                produced.SetDefaults(step.ProducedType);
-                produced.stack = step.ProducedCount;
-
-                // Transfer the source GUID to the newly produced disk and upgrade its
-                // DiskData tier in-place, preserving all previously stored items.
-                if (sourceGuid != Guid.Empty && produced.ModItem is StorageDiskBase resultDisk)
-                {
-                    resultDisk.AssignDiskId(sourceGuid);
-                    StorageWorldSystem.Instance.UpgradeDisk(sourceGuid, resultDisk.Tier);
-                }
-
-                if (isFinalStep)
-                {
-                    // Return the final item directly to the caller — never route it through
-                    // storage first. Routing through storage caused a silent item loss when
-                    // storage was full: the insert would fail, the subsequent extract would
-                    // return nothing, and the caller would receive an air item even though
-                    // ingredients had already been consumed.
-                    // If the recipe produced more items than requested (batch rounding),
-                    // store the excess. Losing excess on a full store is acceptable.
-                    int excess = step.ProducedCount - plan.FinalItemCount;
-                    if (excess > 0)
-                    {
-                        var excessItem = produced.Clone();
-                        excessItem.stack = excess;
-                        StorageWorldSystem.Instance.InsertItem(diskList, excessItem);
-                        produced.stack = plan.FinalItemCount;
-                    }
-                    finalResult = produced;
-                }
-                else
-                {
-                    // Intermediate step: insert into storage so the next step can consume it.
-                    StorageWorldSystem.Instance.InsertItem(diskList, produced);
-                }
-            }
+            Item finalResult = new PlanExecutor<Item>(storage)
+                .Run(ToExecutionSteps(plan), plan.FinalItemCount, producer);
 
             // Apply vanilla crafting simulation (prefix rolling + mod hooks) on the
             // final result, unless Clean Craft is enabled or this is a disk upgrade.
@@ -786,6 +801,76 @@ namespace TerraStorage.Helpers
             return finalResult;
         }
 
+        // Strips a plan down to what the transaction core needs: what each step costs and what it
+        // makes. The Recipe itself is only needed for the prefix and mod-hook pass afterwards.
+        private static List<ExecutionStep> ToExecutionSteps(CraftingPlan plan)
+        {
+            var steps = new List<ExecutionStep>(plan.Steps.Count);
+
+            foreach (var step in plan.Steps)
+            {
+                var executionStep = new ExecutionStep
+                {
+                    ProducedType = step.ProducedType,
+                    ProducedCount = step.ProducedCount
+                };
+
+                foreach (var kvp in step.Consumed)
+                    executionStep.Consumed.Add((kvp.Key, kvp.Value));
+
+                steps.Add(executionStep);
+            }
+
+            return steps;
+        }
+
+        // The Terraria half of executing a plan: building each step's item and carrying a disk's
+        // identity across an upgrade. Material movement is the core's job.
+        private class PlanStepProducer : IStepProducer<Item>
+        {
+            private readonly CraftingPlan _plan;
+            private readonly List<Guid> _diskList;
+            private Guid _sourceDiskGuid = Guid.Empty;
+
+            public PlanStepProducer(CraftingPlan plan, List<Guid> diskList)
+            {
+                _plan = plan;
+                _diskList = diskList;
+            }
+
+            // Detect disk upgrade steps (e.g. Tier1 → Tier2) before anything is consumed.
+            // ExecutePlan bypasses Terraria's crafting pipeline entirely, so the
+            // AddOnCraftCallback registered in DiskRecipes never fires here. We must replicate
+            // the same GUID-transfer logic manually, and the GUID has to be read while the source
+            // disk is still in storage.
+            public void PrepareStep(int stepIndex)
+            {
+                _sourceDiskGuid = Guid.Empty;
+
+                if (IsDiskUpgradeStep(_plan.Steps[stepIndex], out int sourceDiskItemType))
+                    _sourceDiskGuid = FindDiskGuidInStorage(_diskList, sourceDiskItemType);
+            }
+
+            public Item ProduceStep(int stepIndex)
+            {
+                var step = _plan.Steps[stepIndex];
+
+                var produced = new Item();
+                produced.SetDefaults(step.ProducedType);
+                produced.stack = step.ProducedCount;
+
+                // Transfer the source GUID to the newly produced disk and upgrade its
+                // DiskData tier in-place, preserving all previously stored items.
+                if (_sourceDiskGuid != Guid.Empty && produced.ModItem is StorageDiskBase resultDisk)
+                {
+                    resultDisk.AssignDiskId(_sourceDiskGuid);
+                    StorageWorldSystem.Instance.UpgradeDisk(_sourceDiskGuid, resultDisk.Tier);
+                }
+
+                return produced;
+            }
+        }
+
         // Returns true if <paramref name="step"/> produces a Storage Disk by consuming a
         // lower-tier disk as an ingredient. Sets <paramref name="sourceDiskItemType"/> to
         // the consumed disk's item type so the caller can look up its GUID.
@@ -801,15 +886,22 @@ namespace TerraStorage.Helpers
                 return false;
 
             // One of the consumed items must also be a Storage Disk (the source being upgraded)
-            foreach (int consumedType in step.Consumed.Keys)
+            foreach (var consumed in step.Consumed)
             {
                 var temp = new Item();
-                temp.SetDefaults(consumedType);
-                if (temp.ModItem is StorageDiskBase)
-                {
-                    sourceDiskItemType = consumedType;
-                    return true;
-                }
+                temp.SetDefaults(consumed.Key);
+                if (temp.ModItem is not StorageDiskBase)
+                    continue;
+
+                // Exactly one, because only one GUID is read and only one result Item is built:
+                // a batched step consuming several would stamp that GUID on every disk it made
+                // and orphan the rest. Refusing here leaves the step to craft as an ordinary
+                // recipe, which is wrong in a way the player can see rather than a duplication.
+                if (consumed.Value != 1)
+                    return false;
+
+                sourceDiskItemType = consumed.Key;
+                return true;
             }
 
             return false;

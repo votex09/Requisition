@@ -4,14 +4,13 @@ using Terraria;
 using Terraria.DataStructures;
 using Terraria.ModLoader;
 using Terraria.UI;
+using TerraStorage.Common;
 using TerraStorage.Content.Tiles;
 
 namespace TerraStorage.Content.UI
 {
     public class TerminalUISystem : ModSystem
     {
-        private const float MaxInteractDistance = 15f; // tiles
-
         private UserInterface _userInterface;
         private TerminalUIState _uiState;
         private bool _isOpen;
@@ -80,11 +79,12 @@ namespace TerraStorage.Content.UI
             _isOpen = false;
         }
 
-        public override void PreUpdatePlayers()
-        {
-            if (!Main.dedServ && IsMouseOverPanel())
-                Main.LocalPlayer.mouseInterface = true;
-        }
+        // The same rule the server applies to every packet this panel sends. Sharing it is the
+        // point: when the panel and the server disagreed about where a block is measured from,
+        // there was a band where this stayed open and the server refused everything it sent.
+        private bool SenderIsAtTerminal()
+            => TerminalReach.IsWithinRange(Main.LocalPlayer.Center.X, Main.LocalPlayer.Center.Y,
+                _entityTilePos.X, _entityTilePos.Y);
 
         public override void UpdateUI(GameTime gameTime)
         {
@@ -96,15 +96,10 @@ namespace TerraStorage.Content.UI
                     return;
                 }
 
-                if (!_remoteOpen)
+                if (!_remoteOpen && !SenderIsAtTerminal())
                 {
-                    var playerTilePos = Main.LocalPlayer.Center / 16f;
-                    float dist = Vector2.Distance(playerTilePos, _entityTilePos.ToVector2());
-                    if (dist > MaxInteractDistance)
-                    {
-                        CloseTerminal();
-                        return;
-                    }
+                    CloseTerminal();
+                    return;
                 }
             }
         }

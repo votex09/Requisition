@@ -34,6 +34,7 @@ namespace TerraStorage
         public override void Unload()
         {
             Terraria.On_Player.QuickStackAllChests -= Systems.QuickStackSystem.OnQuickStackAllChests;
+            Common.PlainItemCache.Clear();
         }
 
         public override void HandlePacket(System.IO.BinaryReader reader, int whoAmI)

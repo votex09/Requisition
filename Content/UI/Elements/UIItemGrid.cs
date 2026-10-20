@@ -27,6 +27,14 @@ namespace TerraStorage.Content.UI.Elements
 
         private List<ConsolidatedItem> _items = new();
         private Dictionary<int, Item> _drawItemCache = new();
+        // Count-badge strings per index; same lifecycle as _drawItemCache (items are immutable
+        // between SetItems calls, so the text never changes within one list generation).
+        private readonly Dictionary<int, string> _countTextCache = new();
+        // Hover tooltip rebuilt only when the hovered cell / favorite state / alt state changes.
+        private int _lastHoverIndex = -1;
+        private bool _lastHoverFavorited;
+        private bool _lastHoverAlt;
+        private string _hoverText;
         private UIScrollbar _scrollbar;
         private int _columns = 8;
         private int _cellSize = 48;
@@ -62,6 +70,8 @@ namespace TerraStorage.Content.UI.Elements
         {
             _items = items ?? new List<ConsolidatedItem>();
             _drawItemCache.Clear();
+            _countTextCache.Clear();
+            _lastHoverIndex = -1;
             UpdateScrollbar();
         }
 
@@ -96,13 +106,18 @@ namespace TerraStorage.Content.UI.Elements
         {
             base.ScrollWheel(evt);
             if (_scrollbar != null)
-                _scrollTarget -= evt.ScrollWheelValue / 120f * _cellSize;
+            {
+                int gridScrollRows = RequisitionClientConfig.GetGridScrollRows();
+                _scrollTarget -= evt.ScrollWheelValue / 120f * _cellSize * gridScrollRows;
+            }
         }
 
         public override void Update(GameTime gameTime)
         {
             base.Update(gameTime);
             if (_scrollbar == null) return;
+
+            UpdateScrollbar();
 
             float barPixels = _scrollbar.ViewPosition * _cellSize;
 
@@ -248,38 +263,20 @@ namespace TerraStorage.Content.UI.Elements
                             // We must not point Terraria at our cached instance, otherwise
                             // values (e.g. knockback) can accumulate across frames.
                             var hoverItem = GetOrCreateDrawItem(index, consolidatedItem);
-                            var tooltipItem = hoverItem.Clone();
-                            Main.HoverItem = tooltipItem;
+                            Main.HoverItem = hoverItem.Clone();
 
-                            bool altHeld = Keyboard.GetState().IsKeyDown(Keys.LeftAlt)
-                                        || Keyboard.GetState().IsKeyDown(Keys.RightAlt);
-                            if (altHeld)
+                            bool altHeld = Main.keyState.IsKeyDown(Keys.LeftAlt)
+                                        || Main.keyState.IsKeyDown(Keys.RightAlt);
+                            // The tooltip string only depends on (cell, favorite, alt); rebuild
+                            // it on change instead of concatenating every hovered frame.
+                            if (index != _lastHoverIndex || favorited != _lastHoverFavorited || altHeld != _lastHoverAlt)
                             {
-                                var dbg = new StringBuilder();
-                                dbg.Append(tooltipItem.Name);
-                                if (_showFavoriteHint)
-                                    dbg.Append(favorited ? "\nAlt+Click to unfavorite" : "\nAlt+Click to favorite");
-                                dbg.Append("\n[DEBUG NBT]");
-                                if (consolidatedItem.ModData != null)
-                                    dbg.Append($"\nModData keys: {string.Join(", ", consolidatedItem.ModData.Select(kvp => kvp.Key))}");
-                                else
-                                    dbg.Append("\nModData: null");
-                                if (consolidatedItem.FullItemTag != null)
-                                    dbg.Append($"\nFullItemTag keys: {string.Join(", ", consolidatedItem.FullItemTag.Select(kvp => kvp.Key))}");
-                                else
-                                    dbg.Append("\nFullItemTag: null");
-                                Main.hoverItemName = dbg.ToString();
+                                _lastHoverIndex = index;
+                                _lastHoverFavorited = favorited;
+                                _lastHoverAlt = altHeld;
+                                _hoverText = BuildHoverText(hoverItem, consolidatedItem, favorited, altHeld);
                             }
-                            else if (_showFavoriteHint)
-                            {
-                                Main.hoverItemName = favorited
-                                    ? tooltipItem.Name + "\nAlt+Click to unfavorite"
-                                    : tooltipItem.Name + "\nAlt+Click to favorite";
-                            }
-                            else
-                            {
-                                Main.hoverItemName = tooltipItem.Name;
-                            }
+                            Main.hoverItemName = _hoverText;
                         }
                     }
                 }
@@ -291,6 +288,34 @@ namespace TerraStorage.Content.UI.Elements
                 SamplerState.AnisotropicClamp, DepthStencilState.None,
                 RasterizerState.CullNone, null, Main.UIScaleMatrix);
             spriteBatch.GraphicsDevice.ScissorRectangle = savedScissor;
+        }
+
+        private string BuildHoverText(Item tooltipItem, ConsolidatedItem ci, bool favorited, bool altHeld)
+        {
+            if (altHeld)
+            {
+                var dbg = new StringBuilder();
+                dbg.Append(tooltipItem.Name);
+                if (_showFavoriteHint)
+                    dbg.Append(favorited ? "\nAlt+Click to unfavorite" : "\nAlt+Click to favorite");
+                dbg.Append("\n[DEBUG NBT]");
+                if (ci.ModData != null)
+                    dbg.Append($"\nModData keys: {string.Join(", ", ci.ModData.Select(kvp => kvp.Key))}");
+                else
+                    dbg.Append("\nModData: null");
+                if (ci.FullItemTag != null)
+                    dbg.Append($"\nFullItemTag keys: {string.Join(", ", ci.FullItemTag.Select(kvp => kvp.Key))}");
+                else
+                    dbg.Append("\nFullItemTag: null");
+                return dbg.ToString();
+            }
+
+            if (_showFavoriteHint)
+                return favorited
+                    ? tooltipItem.Name + "\nAlt+Click to unfavorite"
+                    : tooltipItem.Name + "\nAlt+Click to favorite";
+
+            return tooltipItem.Name;
         }
 
         private Item GetOrCreateDrawItem(int index, ConsolidatedItem ci)
@@ -346,9 +371,13 @@ namespace TerraStorage.Content.UI.Elements
 
             if (ci.TotalCount > 1)
             {
-                string countText = ci.TotalCount >= 1000
-                    ? $"{ci.TotalCount / 1000f:0.#}k"
-                    : ci.TotalCount.ToString();
+                if (!_countTextCache.TryGetValue(index, out string countText))
+                {
+                    countText = ci.TotalCount >= 1000
+                        ? $"{ci.TotalCount / 1000f:0.#}k"
+                        : ci.TotalCount.ToString();
+                    _countTextCache[index] = countText;
+                }
 
                 Utils.DrawBorderString(spriteBatch, countText,
                     new Vector2(cellRect.Right - 4, cellRect.Bottom - 4),
