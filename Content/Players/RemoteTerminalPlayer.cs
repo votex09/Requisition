@@ -1,10 +1,6 @@
-using Microsoft.Xna.Framework;
 using Terraria;
-using Terraria.DataStructures;
 using Terraria.ModLoader;
 using TerraStorage.Content.Items;
-using TerraStorage.Content.Tiles;
-using TerraStorage.Content.UI;
 
 namespace TerraStorage.Content.Players
 {
@@ -29,7 +25,7 @@ namespace TerraStorage.Content.Players
             if (Main.HoverItem == null || Main.HoverItem.IsAir) return;
             if (Main.HoverItem.ModItem is not RemoteTerminal hoverRemote) return;
 
-            OpenRemote(hoverRemote);
+            hoverRemote.OpenBoundTerminal();
         }
 
         private void HandleHotkey()
@@ -40,29 +36,10 @@ namespace TerraStorage.Content.Players
             {
                 if (Player.inventory[i].ModItem is RemoteTerminal remote)
                 {
-                    OpenRemote(remote);
+                    remote.OpenBoundTerminal();
                     return;
                 }
             }
-        }
-
-        private void OpenRemote(RemoteTerminal remote)
-        {
-            int boundId = remote.BoundEntityId;
-
-            if (boundId < 0)
-            {
-                Main.NewText("Remote Terminal is not bound. Right-click a Crafting Terminal to bind.", Color.Yellow);
-                return;
-            }
-
-            if (!TileEntity.ByID.TryGetValue(boundId, out var te) || te is not TerminalEntity terminal)
-            {
-                Main.NewText("Bound Terminal not found. The Terminal may have been destroyed.", Color.OrangeRed);
-                return;
-            }
-
-            ModContent.GetInstance<TerminalUISystem>()?.OpenTerminalRemote(terminal);
         }
     }
 }

@@ -3317,7 +3317,10 @@ namespace TerraStorage.Tests
             Eq((byte)StorageOperationFailure.DiskClaimRefused, 19, "DN-14u DiskClaimRefused is 19");
             Eq((byte)StorageOperationFailure.DriveBaySlotUnavailable, 20, "DN-14v DriveBaySlotUnavailable is 20");
             Eq((byte)StorageOperationFailure.DriveBayNotOnNetwork, 21, "DN-14w DriveBayNotOnNetwork is 21");
-            Eq(Enum.GetValues<StorageOperationFailure>().Length, 22,
+            Eq((byte)StorageOperationFailure.NotAtCraftingCore, 22, "DN-14x NotAtCraftingCore is 22");
+            Eq((byte)StorageOperationFailure.CraftingCoreSlotUnavailable, 23, "DN-14y CraftingCoreSlotUnavailable is 23");
+            Eq((byte)StorageOperationFailure.CraftingCoreNotFound, 24, "DN-14z CraftingCoreNotFound is 24");
+            Eq(Enum.GetValues<StorageOperationFailure>().Length, 25,
                 "DN-14l a new member was appended without pinning its value");
             Eq(denied.Count, Enum.GetValues<StorageOperationFailure>().Length - 1,
                 "DN-14m every member but None is reportable");
@@ -3356,7 +3359,7 @@ namespace TerraStorage.Tests
             {
                 var mapped = StorageOperationFailures.GetFailureFromWireValue((byte)wireValue);
 
-                var required = wireValue < 22
+                var required = wireValue < 25
                     ? (StorageOperationFailure)wireValue
                     : StorageOperationFailure.Unspecified;
 

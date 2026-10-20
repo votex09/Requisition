@@ -69,8 +69,10 @@ namespace TerraStorage.Content.Tiles
         public override void KillMultiTile(int i, int j, int frameX, int frameY)
         {
             // Drop the new-style Drive Bay item so the player can re-place the upgraded version.
-            Item.NewItem(new EntitySource_TileBreak(i, j), i * 16, j * 16, 32, 32,
-                ModContent.ItemType<Items.DriveBayItem>());
+            // Server and singleplayer only, so a multiplayer client does not spawn a local copy.
+            if (Main.netMode != Terraria.ID.NetmodeID.MultiplayerClient)
+                Item.NewItem(new EntitySource_TileBreak(i, j), i * 16, j * 16, 32, 32,
+                    ModContent.ItemType<Items.DriveBayItem>());
             ModContent.GetInstance<DriveBayEntity>().Kill(i, j);
         }
     }

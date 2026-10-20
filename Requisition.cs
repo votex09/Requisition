@@ -19,16 +19,29 @@ namespace TerraStorage
             string logDir = Path.Combine(AppContext.BaseDirectory, "tModLoader-Logs");
             DebugLogPath = Path.Combine(logDir, "requisition_debug.log");
 
-            // Rotate: keep last 3 sessions
-            // .log → .1.log → .2.log → deleted
-            string slot2 = Path.Combine(logDir, "requisition_debug.2.log");
-            string slot1 = Path.Combine(logDir, "requisition_debug.1.log");
+            // The debug log is a convenience, so nothing about it may fail the mod's load. A file
+            // locked by another process (Host & Play runs a server from the same install, writing
+            // the same log) or an unwritable install directory just means no debug log this session.
+            try
+            {
+                Directory.CreateDirectory(logDir);
 
-            if (File.Exists(slot2)) File.Delete(slot2);
-            if (File.Exists(slot1)) File.Move(slot1, slot2);
-            if (File.Exists(DebugLogPath)) File.Move(DebugLogPath, slot1);
+                // Rotate: keep last 3 sessions
+                // .log → .1.log → .2.log → deleted
+                string slot2 = Path.Combine(logDir, "requisition_debug.2.log");
+                string slot1 = Path.Combine(logDir, "requisition_debug.1.log");
 
-            File.WriteAllText(DebugLogPath, $"=== Requisition Debug Log — {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===\n");
+                if (File.Exists(slot2)) File.Delete(slot2);
+                if (File.Exists(slot1)) File.Move(slot1, slot2);
+                if (File.Exists(DebugLogPath)) File.Move(DebugLogPath, slot1);
+
+                File.WriteAllText(DebugLogPath, $"=== Requisition Debug Log — {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===\n");
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                Logger.Warn($"Debug log unavailable this session: {ex.Message}");
+                DebugLogPath = null;
+            }
         }
 
         public override void Unload()

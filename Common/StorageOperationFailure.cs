@@ -35,6 +35,9 @@ namespace TerraStorage.Common
         DiskClaimRefused = 19,
         DriveBaySlotUnavailable = 20,
         DriveBayNotOnNetwork = 21,
+        NotAtCraftingCore = 22,
+        CraftingCoreSlotUnavailable = 23,
+        CraftingCoreNotFound = 24,
     }
 
     public static class StorageOperationFailures
@@ -62,6 +65,9 @@ namespace TerraStorage.Common
             StorageOperationFailure.DiskClaimRefused,
             StorageOperationFailure.DriveBaySlotUnavailable,
             StorageOperationFailure.DriveBayNotOnNetwork,
+            StorageOperationFailure.NotAtCraftingCore,
+            StorageOperationFailure.CraftingCoreSlotUnavailable,
+            StorageOperationFailure.CraftingCoreNotFound,
         };
 
         public static IReadOnlyList<StorageOperationFailure> GetDeniedFailures() => Denied;
@@ -116,7 +122,10 @@ namespace TerraStorage.Common
                     or StorageOperationFailure.NothingToDefragment
                     or StorageOperationFailure.DiskClaimRefused
                     or StorageOperationFailure.DriveBaySlotUnavailable
-                    or StorageOperationFailure.DriveBayNotOnNetwork => candidate,
+                    or StorageOperationFailure.DriveBayNotOnNetwork
+                    or StorageOperationFailure.NotAtCraftingCore
+                    or StorageOperationFailure.CraftingCoreSlotUnavailable
+                    or StorageOperationFailure.CraftingCoreNotFound => candidate,
                 _ => StorageOperationFailure.Unspecified,
             };
         }

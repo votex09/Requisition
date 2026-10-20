@@ -68,12 +68,12 @@ namespace TerraStorage.Content.Tiles
 
         public override void KillMultiTile(int i, int j, int frameX, int frameY)
         {
-            var entity = CraftingCoreEntity.FindEntity(i, j);
-            if (entity != null)
-                entity.DropStations(i, j);
+            CraftingCoreEntity.FindEntityAt(i, j)?.DropStations(i, j);
 
-            Item.NewItem(new EntitySource_TileBreak(i, j), i * 16, j * 16, 32, 32,
-                ModContent.ItemType<Items.CraftingCoreItem>());
+            // Server and singleplayer only, so a multiplayer client does not spawn a local copy.
+            if (Main.netMode != Terraria.ID.NetmodeID.MultiplayerClient)
+                Item.NewItem(new EntitySource_TileBreak(i, j), i * 16, j * 16, 32, 32,
+                    ModContent.ItemType<Items.CraftingCoreItem>());
             ModContent.GetInstance<CraftingCoreEntity>().Kill(i, j);
         }
     }
