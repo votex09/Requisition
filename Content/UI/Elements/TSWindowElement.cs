@@ -76,10 +76,10 @@ namespace TerraStorage.Content.UI.Elements
 
             if (UIPositionStore.TryGetSize(StoreKey, out float w, out float h))
             {
-                // Also clamp to the viewport: a size saved at a lower UI scale (or larger
-                // window) can exceed the logical screen now, which would pin the window to a corner.
-                Width.Set(Math.Clamp(w, WinMinWidth, Math.Min(WinMaxWidth, viewW)), 0f);
-                Height.Set(Math.Clamp(h, WinMinHeight, Math.Min(WinMaxHeight, viewH)), 0f);
+                // Clamp to the live viewport (not the stored WinMax*, a stale init snapshot):
+                // a size saved at a lower UI scale or larger window can exceed the screen now.
+                Width.Set(Math.Clamp(w, WinMinWidth, Math.Max(WinMinWidth, viewW)), 0f);
+                Height.Set(Math.Clamp(h, WinMinHeight, Math.Max(WinMinHeight, viewH)), 0f);
             }
 
             if (UIPositionStore.TryGet(StoreKey, out float x, out float y))
@@ -149,10 +149,13 @@ namespace TerraStorage.Content.UI.Elements
                 }
                 else
                 {
-                    float newW = Math.Clamp(_resizeOrigW + (Main.MouseScreen.X - _resizeStart.X), WinMinWidth, WinMaxWidth);
-                    // Logical height, and never let max drop below min: Math.Clamp throws when
-                    // min > max, which would spam an exception every frame of the resize.
-                    float maxH = Math.Max(WinMinHeight, Math.Min(WinMaxHeight, UIDrawHelpers.UiHeight - dims.Y - 10));
+                    // Cap to the live viewport (space from the window's top-left to the screen
+                    // edge), not the stored WinMax*: those are a snapshot from init and go stale
+                    // when the window or UI scale changes after the panel was first laid out,
+                    // which locked the height near where the screen used to end.
+                    float maxW = Math.Max(WinMinWidth,  UIDrawHelpers.UiWidth  - dims.X - 10);
+                    float maxH = Math.Max(WinMinHeight, UIDrawHelpers.UiHeight - dims.Y - 10);
+                    float newW = Math.Clamp(_resizeOrigW + (Main.MouseScreen.X - _resizeStart.X), WinMinWidth, maxW);
                     float newH = Math.Clamp(_resizeOrigH + (Main.MouseScreen.Y - _resizeStart.Y), WinMinHeight, maxH);
                     Width.Set(newW, 0f);
                     Height.Set(newH, 0f);
@@ -227,14 +230,17 @@ namespace TerraStorage.Content.UI.Elements
             UIPositionStore.SaveWithSize(StoreKey, Left.Pixels, Top.Pixels, Width.Pixels, Height.Pixels);
         }
 
-        // Clamp a window's top-left on one axis so it stays reachable. When the window is
-        // smaller than the viewport it stays fully on screen; when it is larger (high UI
-        // scale on a small window) it can be panned, so no part is pinned off-screen.
-        // lo <= hi always, so Math.Clamp can never throw.
-        private static float ClampAxis(float value, float size, float viewport)
+        // Clamp a window's top-left on one axis so it stays reachable. The near edge stays on
+        // screen (so the title/drag strip is always grabbable) and the window can be pushed until
+        // only a minVisible strip of it remains — so a window nearly as large as the viewport can
+        // still be dragged. If it is larger than the viewport it can also be panned the other way
+        // to reveal the far edge. lo <= hi always, so Math.Clamp can never throw.
+        private static float ClampAxis(float value, float size, float viewport, float minVisible = 60f)
         {
-            float slack = viewport - size;
-            return Math.Clamp(value, Math.Min(0f, slack), Math.Max(0f, slack));
+            float lo = Math.Min(0f, viewport - size);
+            float hi = viewport - minVisible;
+            if (hi < lo) hi = lo;
+            return Math.Clamp(value, lo, hi);
         }
 
         private static Rectangle ResizeRect(CalculatedStyle dims) =>
