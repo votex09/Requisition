@@ -44,7 +44,7 @@ namespace TerraStorage.Content.Tiles
             // If player is holding a Remote Terminal, bind it instead of opening the UI.
             if (Main.LocalPlayer.HeldItem.ModItem is Items.RemoteTerminal remote)
             {
-                remote.BoundEntityId = entity.ID;
+                remote.Bind(entity);
                 Main.NewText("Remote Terminal bound.", Microsoft.Xna.Framework.Color.LightCyan);
                 return true;
             }

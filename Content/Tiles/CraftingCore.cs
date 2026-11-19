@@ -70,9 +70,7 @@ namespace TerraStorage.Content.Tiles
 
         public override void KillMultiTile(int i, int j, int frameX, int frameY)
         {
-            var entity = CraftingCoreEntity.FindEntity(i, j);
-            if (entity != null)
-                entity.DropStations(i, j);
+            CraftingCoreEntity.FindEntityAt(i, j)?.DropStations(i, j);
 
             ModContent.GetInstance<CraftingCoreEntity>().Kill(i, j);
         }

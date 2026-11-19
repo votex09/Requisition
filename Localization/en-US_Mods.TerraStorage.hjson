@@ -292,5 +292,8 @@ UI: {
 		DiskClaimRefused: that disk belongs to another player.
 		DriveBaySlotUnavailable: that Drive Bay slot was filled first.
 		DriveBayNotOnNetwork: that Drive Bay is not connected to this Terminal.
+		NotAtCraftingCore: you are too far from that Crafting Core.
+		CraftingCoreSlotUnavailable: that Crafting Core slot was filled first.
+		CraftingCoreNotFound: that Crafting Core is no longer there.
 	}
 }

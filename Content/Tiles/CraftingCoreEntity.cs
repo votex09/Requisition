@@ -177,18 +177,33 @@ namespace TerraStorage.Content.Tiles
             return removed;
         }
 
-        // Drop all stations when the block is destroyed.
+        // Drop all stations when the block is destroyed. Server and singleplayer only: the server
+        // breaks the tile too, and a client's own drop would be a second, local-only copy.
+        // The whole item is dropped rather than its type/stack/prefix, so per-instance mod data
+        // survives.
         public void DropStations(int x, int y)
         {
+            if (Main.netMode == NetmodeID.MultiplayerClient)
+                return;
+
             InitializeSlots();
             for (int i = 0; i < StationSlotCount; i++)
             {
                 if (!StationSlots[i].IsAir)
                 {
-                    Item.NewItem(new EntitySource_TileBreak(x, y), x * 16, y * 16, 32, 32, StationSlots[i].type, StationSlots[i].stack, false, StationSlots[i].prefix);
+                    Item.NewItem(new EntitySource_TileBreak(x, y), x * 16, y * 16, 32, 32, StationSlots[i]);
                     StationSlots[i].TurnToAir();
                 }
             }
+        }
+
+        // The entity of a Crafting Core being destroyed. KillMultiTile runs after the tiles are
+        // cleared, so FindEntity (which needs HasTile) cannot see it; the entity sits at (i, j).
+        public static CraftingCoreEntity FindEntityAt(int i, int j)
+        {
+            return TileEntity.ByPosition.TryGetValue(new Point16(i, j), out var entity)
+                ? entity as CraftingCoreEntity
+                : null;
         }
 
         //Opens the station management UI for this Crafting Core.

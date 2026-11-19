@@ -47,9 +47,17 @@ namespace TerraStorage.Content.Tiles
             InitializeSlots();
         }
 
+        // tModLoader only calls Update on the server and in singleplayer, so on a multiplayer client
+        // nothing ran this and the lights only changed when a packet happened to refresh them.
+        // DriveBayLightSystem drives it there instead.
         public override void Update()
         {
-            if (Main.netMode == NetmodeID.Server) return;
+            if (Main.netMode == NetmodeID.SinglePlayer)
+                UpdateVisuals();
+        }
+
+        internal void UpdateVisuals()
+        {
             var sys = StorageWorldSystem.Instance;
             if (sys == null) return;
 
@@ -375,6 +383,23 @@ namespace TerraStorage.Content.Tiles
                 return sbe;
 
             return null;
+        }
+    }
+
+    // Runs DriveBayEntity.UpdateVisuals on multiplayer clients, where tModLoader does not call
+    // tile entity Update.
+    public class DriveBayLightSystem : ModSystem
+    {
+        public override void PostUpdateEverything()
+        {
+            if (Main.netMode != NetmodeID.MultiplayerClient || Main.gameMenu)
+                return;
+
+            foreach (var entity in TileEntity.ByID.Values)
+            {
+                if (entity is DriveBayEntity bay)
+                    bay.UpdateVisuals();
+            }
         }
     }
 }

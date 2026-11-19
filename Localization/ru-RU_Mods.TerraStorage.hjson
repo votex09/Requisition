@@ -292,5 +292,8 @@ UI: {
 		DiskClaimRefused: этот диск принадлежит другому игроку.
 		DriveBaySlotUnavailable: эта ячейка Дискового отсека была занята раньше.
 		DriveBayNotOnNetwork: этот Дисковый отсек не подключён к этому терминалу.
+		NotAtCraftingCore: вы слишком далеко от этого Ядра крафта.
+		CraftingCoreSlotUnavailable: эта ячейка Ядра крафта была занята раньше.
+		CraftingCoreNotFound: этого Ядра крафта больше нет.
 	}
 }
