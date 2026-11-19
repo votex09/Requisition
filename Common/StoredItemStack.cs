@@ -37,7 +37,7 @@ namespace TerraStorage.Common
         {
             get
             {
-                _isUnique ??= StackIdentity.IsUnique(ModData != null, GameRefusesToStackWithPlainItem());
+                _isUnique ??= StackIdentity.IsUnique(ModData != null, DiffersFromPlainCopy());
                 return _isUnique.Value;
             }
         }
@@ -47,7 +47,7 @@ namespace TerraStorage.Common
         public void CopyIdentityVerdictFrom(StoredItemStack source)
         {
             source._isUnique ??= StackIdentity.IsUnique(source.ModData != null,
-                source.GameRefusesToStackWithPlainItem());
+                source.DiffersFromPlainCopy());
             _isUnique = source._isUnique;
         }
 
@@ -98,16 +98,25 @@ namespace TerraStorage.Common
             return _identityItem;
         }
 
-        // Deliberately does NOT go through GetIdentityItem: every stack in a modded world reaches
-        // here once, and holding an Item per stack afterwards is what the identity cache exists to
-        // avoid. Only stacks that turn out to stand for themselves keep one.
-        private bool GameRefusesToStackWithPlainItem()
+        // Whether this stack carries state a plain copy of the same type and prefix would not: the
+        // game refuses to stack it with one (CanStack), or a mod wrote per-instance data into it
+        // that a fresh copy lacks (globalData - e.g. WeaponPerks perks, which vary items without
+        // overriding CanStack). Deliberately does NOT go through GetIdentityItem: every stack in a
+        // modded world reaches here once, and holding an Item per stack afterwards is what the
+        // identity cache exists to avoid. Only stacks that stand for themselves keep one.
+        private bool DiffersFromPlainCopy()
         {
+            if (FullItemTag == null)
+                return false;
+
             var loaded = LoadFullItem();
             if (loaded == null)
                 return false;
 
-            return !GameAllowsStacking(PlainItemCache.Get(ItemType, PrefixId), loaded);
+            if (!GameAllowsStacking(PlainItemCache.Get(ItemType, PrefixId), loaded))
+                return true;
+
+            return !DiskData.ModStateMatches(FullItemTag, PlainItemCache.GetFullTag(ItemType, PrefixId));
         }
 
         // A tag written by an older format, or by a mod since removed, can still fail to load. That
@@ -125,28 +134,6 @@ namespace TerraStorage.Common
             {
                 return null;
             }
-        }
-
-        // A chest lets the mod fold an incoming item's state into the stack it lands on, through
-        // OnStack. Only reached when the two carry different state, so an ordinary deposit never
-        // pays for it. The destination is presented at its real size first: a mod averaging or
-        // apportioning over the stack is told how much it is merging into.
-        public void FoldInModState(Item incoming, int transferred)
-        {
-            var destination = LoadFullItem() ?? GetIdentityItem().Clone();
-
-            destination.stack = Stack;
-            ItemLoader.OnStack(destination, incoming, transferred);
-            destination.stack = Stack + transferred;
-
-            FullItemTag = ItemIO.Save(destination);
-            ResetIdentityCaches();
-        }
-
-        private void ResetIdentityCaches()
-        {
-            _isUnique = null;
-            _identityItem = null;
         }
 
         public StoredItemStack() { }

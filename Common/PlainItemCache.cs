@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using Terraria;
+using Terraria.ModLoader.IO;
 
 namespace TerraStorage.Common
 {
@@ -9,8 +10,14 @@ namespace TerraStorage.Common
     public static class PlainItemCache
     {
         private static readonly ConcurrentDictionary<(int type, int prefix), Item> Items = new();
+        private static readonly ConcurrentDictionary<(int type, int prefix), TagCompound> FullTags = new();
 
         public static Item Get(int itemType, int prefixId) => Items.GetOrAdd((itemType, prefixId), Build);
+
+        // The full ItemIO tag of a plain copy, so a stored stack's mod-written state (globalData)
+        // can be compared against what an ordinary copy of the same item carries. Only read.
+        public static TagCompound GetFullTag(int itemType, int prefixId)
+            => FullTags.GetOrAdd((itemType, prefixId), k => ItemIO.Save(Get(k.Item1, k.Item2)));
 
         private static Item Build((int type, int prefix) key)
         {
@@ -25,6 +32,6 @@ namespace TerraStorage.Common
             return plain;
         }
 
-        public static void Clear() => Items.Clear();
+        public static void Clear() { Items.Clear(); FullTags.Clear(); }
     }
 }

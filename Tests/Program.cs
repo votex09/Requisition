@@ -3250,14 +3250,14 @@ namespace TerraStorage.Tests
         {
             Section("Stack identity: what makes a stack its own item");
 
-            IsFalse(StackIdentity.IsUnique(hasModItemData: false, gameRefusesToStackWithPlainItem: false),
-                "SI-01 a plain fruit carrying another mod's GlobalItem bytes is NOT its own item");
+            IsFalse(StackIdentity.IsUnique(hasModItemData: false, differsFromPlainItem: false),
+                "SI-01 a fruit whose GlobalItem bytes match a plain copy is NOT its own item");
 
-            IsTrue(StackIdentity.IsUnique(hasModItemData: true, gameRefusesToStackWithPlainItem: false),
+            IsTrue(StackIdentity.IsUnique(hasModItemData: true, differsFromPlainItem: false),
                 "SI-02 a storage disk, whose GUID is its own ModItem save data, IS its own item");
 
-            IsTrue(StackIdentity.IsUnique(hasModItemData: false, gameRefusesToStackWithPlainItem: true),
-                "SI-03 an item the game itself refuses to stack IS its own item");
+            IsTrue(StackIdentity.IsUnique(hasModItemData: false, differsFromPlainItem: true),
+                "SI-03 an item differing from a plain copy (game refuses to stack, or per-instance globalData) IS its own item");
 
             IsTrue(StackIdentity.MustPreserveFullTag(hasModItemData: false, carriesModWrittenData: true),
                 "SI-04 mod-written bytes are still preserved for extraction");
