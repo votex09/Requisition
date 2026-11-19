@@ -175,8 +175,8 @@ namespace TerraStorage.Content.UI
                 {
                     _btnX = Main.MouseScreen.X - _btnDragOffset.X;
                     _btnY = Main.MouseScreen.Y - _btnDragOffset.Y;
-                    _btnX = Math.Clamp(_btnX, 0, Main.screenWidth  - BtnSize);
-                    _btnY = Math.Clamp(_btnY, 0, Main.screenHeight - BtnSize);
+                    _btnX = Math.Clamp(_btnX, 0, Math.Max(0f, UIDrawHelpers.UiWidth  - BtnSize));
+                    _btnY = Math.Clamp(_btnY, 0, Math.Max(0f, UIDrawHelpers.UiHeight - BtnSize));
                     Main.LocalPlayer.mouseInterface = true;
                 }
                 return;

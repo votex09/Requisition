@@ -623,7 +623,8 @@ namespace TerraStorage.Content.UI.CraftingTree
                 else
                 {
                     _panelWidth = Math.Clamp(_resizeOrigWidth + (mouse.X - _resizeStart.X), PanelMinWidth, PanelMaxWidth);
-                    float maxH = Math.Min(Main.screenHeight - _panelY - 10, PanelMaxHeight);
+                    // Logical height; keep max >= min so Math.Clamp can't throw mid-resize.
+                    float maxH = Math.Max(PanelMinHeight, Math.Min(UIDrawHelpers.UiHeight - _panelY - 10, PanelMaxHeight));
                     _panelHeight = Math.Clamp(_resizeOrigHeight + (mouse.Y - _resizeStart.Y), PanelMinHeight, maxH);
                 }
                 _prevMouseLeft = UIClickBlocker.RealMouseLeft;

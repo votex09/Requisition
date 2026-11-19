@@ -71,18 +71,23 @@ namespace TerraStorage.Content.UI.Elements
         {
             if (StoreKey == null) return;
 
+            float viewW = UIDrawHelpers.UiWidth;
+            float viewH = UIDrawHelpers.UiHeight;
+
             if (UIPositionStore.TryGetSize(StoreKey, out float w, out float h))
             {
-                Width.Set(Math.Clamp(w, WinMinWidth, WinMaxWidth), 0f);
-                Height.Set(Math.Clamp(h, WinMinHeight, WinMaxHeight), 0f);
+                // Clamp to the live viewport (not the stored WinMax*, a stale init snapshot):
+                // a size saved at a lower UI scale or larger window can exceed the screen now.
+                Width.Set(Math.Clamp(w, WinMinWidth, Math.Max(WinMinWidth, viewW)), 0f);
+                Height.Set(Math.Clamp(h, WinMinHeight, Math.Max(WinMinHeight, viewH)), 0f);
             }
 
             if (UIPositionStore.TryGet(StoreKey, out float x, out float y))
             {
                 HAlign = 0f;
                 VAlign = 0f;
-                Left.Set(x, 0f);
-                Top.Set(y, 0f);
+                Left.Set(ClampAxis(x, Width.Pixels, viewW), 0f);
+                Top.Set(ClampAxis(y, Height.Pixels, viewH), 0f);
             }
         }
 
@@ -144,8 +149,13 @@ namespace TerraStorage.Content.UI.Elements
                 }
                 else
                 {
-                    float newW = Math.Clamp(_resizeOrigW + (Main.MouseScreen.X - _resizeStart.X), WinMinWidth, WinMaxWidth);
-                    float maxH = Math.Min(WinMaxHeight, Main.screenHeight - dims.Y - 10);
+                    // Cap to the live viewport (space from the window's top-left to the screen
+                    // edge), not the stored WinMax*: those are a snapshot from init and go stale
+                    // when the window or UI scale changes after the panel was first laid out,
+                    // which locked the height near where the screen used to end.
+                    float maxW = Math.Max(WinMinWidth,  UIDrawHelpers.UiWidth  - dims.X - 10);
+                    float maxH = Math.Max(WinMinHeight, UIDrawHelpers.UiHeight - dims.Y - 10);
+                    float newW = Math.Clamp(_resizeOrigW + (Main.MouseScreen.X - _resizeStart.X), WinMinWidth, maxW);
                     float newH = Math.Clamp(_resizeOrigH + (Main.MouseScreen.Y - _resizeStart.Y), WinMinHeight, maxH);
                     Width.Set(newW, 0f);
                     Height.Set(newH, 0f);
@@ -167,8 +177,8 @@ namespace TerraStorage.Content.UI.Elements
                 }
                 else
                 {
-                    float nx = Math.Clamp(Main.MouseScreen.X - _dragOffset.X, 0, Main.screenWidth  - dims.Width);
-                    float ny = Math.Clamp(Main.MouseScreen.Y - _dragOffset.Y, 0, Main.screenHeight - dims.Height);
+                    float nx = ClampAxis(Main.MouseScreen.X - _dragOffset.X, dims.Width,  UIDrawHelpers.UiWidth);
+                    float ny = ClampAxis(Main.MouseScreen.Y - _dragOffset.Y, dims.Height, UIDrawHelpers.UiHeight);
                     Left.Set(nx, 0f);
                     Top.Set(ny, 0f);
                     Recalculate();
@@ -218,6 +228,19 @@ namespace TerraStorage.Content.UI.Elements
         {
             if (StoreKey == null) return;
             UIPositionStore.SaveWithSize(StoreKey, Left.Pixels, Top.Pixels, Width.Pixels, Height.Pixels);
+        }
+
+        // Clamp a window's top-left on one axis so it stays reachable. The near edge stays on
+        // screen (so the title/drag strip is always grabbable) and the window can be pushed until
+        // only a minVisible strip of it remains — so a window nearly as large as the viewport can
+        // still be dragged. If it is larger than the viewport it can also be panned the other way
+        // to reveal the far edge. lo <= hi always, so Math.Clamp can never throw.
+        private static float ClampAxis(float value, float size, float viewport, float minVisible = 60f)
+        {
+            float lo = Math.Min(0f, viewport - size);
+            float hi = viewport - minVisible;
+            if (hi < lo) hi = lo;
+            return Math.Clamp(value, lo, hi);
         }
 
         private static Rectangle ResizeRect(CalculatedStyle dims) =>

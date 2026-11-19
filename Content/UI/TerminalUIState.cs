@@ -162,7 +162,7 @@ namespace TerraStorage.Content.UI
 
         public override void OnInitialize()
         {
-            _panelHeight = Math.Min(Math.Max(400, Main.screenHeight - 340), Main.screenHeight * 0.6f);
+            _panelHeight = Math.Min(Math.Max(400, UIDrawHelpers.UiHeight - 340), UIDrawHelpers.UiHeight * 0.6f);
 
             _mainPanel = new TSWindowElement
             {
@@ -172,7 +172,7 @@ namespace TerraStorage.Content.UI
                 WinMinWidth  = PanelMinWidth,
                 WinMaxWidth  = PanelMaxWidth,
                 WinMinHeight = PanelMinHeight,
-                WinMaxHeight = (float)(Main.screenHeight * 0.8f),
+                WinMaxHeight = UIDrawHelpers.UiHeight * 0.8f,
             };
             _mainPanel.Width.Set(_panelWidth, 0f);
             _mainPanel.Height.Set(_panelHeight, 0f);

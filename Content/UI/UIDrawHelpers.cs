@@ -18,6 +18,15 @@ namespace TerraStorage.Content.UI
         // twin — existing per-class statics intentionally stay to keep the diff minimal).
         internal static readonly RasterizerState ScissorRasterizer = new() { ScissorTestEnable = true };
 
+        // UI layout and hit-testing live in logical units: UserInterface sizes its root to
+        // PlayerInput.OriginalScreenSize / UIScale (see UserInterface.GetDimensions) and
+        // Main.MouseScreen is already in that space. Main.screenWidth/Height are the backbuffer
+        // size, which on a HiDPI display is SMALLER than OriginalScreenSize — dividing those by
+        // UIScale gives a viewport that is only part of the real one, confining windows to a
+        // corner. Use OriginalScreenSize so the clamp space matches the actual layout space.
+        internal static float UiWidth  => Terraria.GameInput.PlayerInput.OriginalScreenSize.X / Main.UIScale;
+        internal static float UiHeight => Terraria.GameInput.PlayerInput.OriginalScreenSize.Y / Main.UIScale;
+
         private static Texture2D _pixel;
 
         private static Texture2D GetPixel(SpriteBatch sb)
