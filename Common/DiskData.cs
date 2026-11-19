@@ -57,23 +57,20 @@ namespace TerraStorage.Common
             TagCompound fullItemTag = StackIdentity.MustPreserveFullTag(modData != null, carriesModWrittenData)
                 ? fullSave : null;
             bool incomingIsUnique = IsUniqueItem(item, modData);
-            bool anyFold = false;
 
-            // Merge on the game's own stacking rule, the one a chest and the player inventory use.
-            // Mod-written bytes ride along on every item in a modded world and say nothing about
-            // whether two of them are the same thing.
+            // Merge on the game's own stacking rule, the one a chest and the player inventory use,
+            // but only into a stack already carrying the same mod-written state. Folding a stack of
+            // one state into another needs the mod's OnStack to know what it is merging, and a mod
+            // that varies items without saying so (WeaponPerks) has none - the fold would rebuild
+            // the tag from the destination and drop the incoming item's state. Defragmenting already
+            // keeps different-state stacks apart (CanMergeStacks); depositing now agrees with it.
             foreach (var stored in Items)
             {
                 if (stored.Matches(item.type, item.prefix) && stored.Stack < item.maxStack
+                    && ModStateMatches(stored.FullItemTag, fullItemTag)
                     && stored.StacksWith(item, incomingIsUnique))
                 {
                     int canAdd = Math.Min(remaining, item.maxStack - stored.Stack);
-                    if (!ModStateMatches(stored.FullItemTag, fullItemTag))
-                    {
-                        stored.FoldInModState(item, canAdd);
-                        anyFold = true;
-                    }
-
                     stored.Stack += canAdd;
                     if (insertionOrder > 0)
                         stored.InsertionOrder = insertionOrder;
@@ -82,12 +79,6 @@ namespace TerraStorage.Common
                         return 0;
                 }
             }
-
-            // A fold hands the incoming item to the mod, which may have drained state out of it.
-            // Whatever is left over has to be stored as it is now, not as it arrived.
-            if (anyFold)
-                fullItemTag = StackIdentity.MustPreserveFullTag(modData != null, carriesModWrittenData)
-                    ? ItemIO.Save(item) : null;
 
             // Add new stacks
             while (remaining > 0 && !IsFull)
@@ -438,7 +429,18 @@ namespace TerraStorage.Common
         public static bool IsUniqueItem(Item item, TagCompound modData)
         {
             var plain = PlainItemCache.Get(item.type, item.prefix);
-            return StackIdentity.IsUnique(modData != null, !StoredItemStack.GameAllowsStacking(plain, item));
+            bool differs = !StoredItemStack.GameAllowsStacking(plain, item)
+                || CarriesStateBeyondPlain(item);
+            return StackIdentity.IsUnique(modData != null, differs);
+        }
+
+        // Whether a live item carries mod-written state a plain copy of the same type and prefix
+        // would not. Catches mods that vary items per-instance without overriding CanStack; a mod
+        // that stamps the same bytes on every copy still compares equal and keeps pooling.
+        private static bool CarriesStateBeyondPlain(Item item)
+        {
+            var full = ItemIO.Save(item);
+            return !ModStateMatches(full, PlainItemCache.GetFullTag(item.type, item.prefix));
         }
 
         public static bool IsUniqueItem(Item item)
