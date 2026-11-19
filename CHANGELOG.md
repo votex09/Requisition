@@ -1,4 +1,10 @@
 # Requisition Changelog
+## [0.5.20]
+
+### Fixed
+- **Items with their own stats are no longer mangled by storage.** A weapon carrying per-instance state that a plain copy of the same item lacks — a Weapon Perks roll, for example — used to be pooled with identical-looking plain copies, so depositing it next to one could lose the roll or hand back the wrong copy. Such items are now kept as their own thing and come back exactly as you put them in
+- **High UI scale no longer breaks the windows.** On a high-resolution display, or with the UI scale turned up, the Terminal and Encyclopedia windows were stuck in the top-left of the screen, could not be dragged or resized past a point, and dragging one could freeze the game until you alt-tabbed. Windows now use the whole screen and drag and resize correctly at any UI scale
+
 ## [0.5.2]
 
 ### Added
