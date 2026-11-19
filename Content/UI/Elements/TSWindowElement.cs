@@ -71,18 +71,23 @@ namespace TerraStorage.Content.UI.Elements
         {
             if (StoreKey == null) return;
 
+            float viewW = UIDrawHelpers.UiWidth;
+            float viewH = UIDrawHelpers.UiHeight;
+
             if (UIPositionStore.TryGetSize(StoreKey, out float w, out float h))
             {
-                Width.Set(Math.Clamp(w, WinMinWidth, WinMaxWidth), 0f);
-                Height.Set(Math.Clamp(h, WinMinHeight, WinMaxHeight), 0f);
+                // Also clamp to the viewport: a size saved at a lower UI scale (or larger
+                // window) can exceed the logical screen now, which would pin the window to a corner.
+                Width.Set(Math.Clamp(w, WinMinWidth, Math.Min(WinMaxWidth, viewW)), 0f);
+                Height.Set(Math.Clamp(h, WinMinHeight, Math.Min(WinMaxHeight, viewH)), 0f);
             }
 
             if (UIPositionStore.TryGet(StoreKey, out float x, out float y))
             {
                 HAlign = 0f;
                 VAlign = 0f;
-                Left.Set(x, 0f);
-                Top.Set(y, 0f);
+                Left.Set(ClampAxis(x, Width.Pixels, viewW), 0f);
+                Top.Set(ClampAxis(y, Height.Pixels, viewH), 0f);
             }
         }
 
@@ -169,8 +174,8 @@ namespace TerraStorage.Content.UI.Elements
                 }
                 else
                 {
-                    float nx = Math.Clamp(Main.MouseScreen.X - _dragOffset.X, 0, Math.Max(0f, UIDrawHelpers.UiWidth  - dims.Width));
-                    float ny = Math.Clamp(Main.MouseScreen.Y - _dragOffset.Y, 0, Math.Max(0f, UIDrawHelpers.UiHeight - dims.Height));
+                    float nx = ClampAxis(Main.MouseScreen.X - _dragOffset.X, dims.Width,  UIDrawHelpers.UiWidth);
+                    float ny = ClampAxis(Main.MouseScreen.Y - _dragOffset.Y, dims.Height, UIDrawHelpers.UiHeight);
                     Left.Set(nx, 0f);
                     Top.Set(ny, 0f);
                     Recalculate();
@@ -220,6 +225,16 @@ namespace TerraStorage.Content.UI.Elements
         {
             if (StoreKey == null) return;
             UIPositionStore.SaveWithSize(StoreKey, Left.Pixels, Top.Pixels, Width.Pixels, Height.Pixels);
+        }
+
+        // Clamp a window's top-left on one axis so it stays reachable. When the window is
+        // smaller than the viewport it stays fully on screen; when it is larger (high UI
+        // scale on a small window) it can be panned, so no part is pinned off-screen.
+        // lo <= hi always, so Math.Clamp can never throw.
+        private static float ClampAxis(float value, float size, float viewport)
+        {
+            float slack = viewport - size;
+            return Math.Clamp(value, Math.Min(0f, slack), Math.Max(0f, slack));
         }
 
         private static Rectangle ResizeRect(CalculatedStyle dims) =>
