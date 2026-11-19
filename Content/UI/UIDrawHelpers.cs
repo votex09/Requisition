@@ -18,6 +18,15 @@ namespace TerraStorage.Content.UI
         // twin — existing per-class statics intentionally stay to keep the diff minimal).
         internal static readonly RasterizerState ScissorRasterizer = new() { ScissorTestEnable = true };
 
+        // UI layout and hit-testing live in logical units: UserInterface sizes its root to
+        // screenWidth/UIScale (see UserInterface.GetDimensions) and Main.MouseScreen is already in
+        // that space, but Main.screenWidth/Height are raw pixels. Divide a pixel screen size by
+        // these before comparing it to element dimensions or clamping a window, or panels are
+        // oversized by UIScale and their controls fall off the visible area above UI scale 1.
+        // Matches vanilla, which converts the same way (Main: screenWidth * (1f / UIScale)).
+        internal static float UiWidth  => Main.screenWidth  / Main.UIScale;
+        internal static float UiHeight => Main.screenHeight / Main.UIScale;
+
         private static Texture2D _pixel;
 
         private static Texture2D GetPixel(SpriteBatch sb)

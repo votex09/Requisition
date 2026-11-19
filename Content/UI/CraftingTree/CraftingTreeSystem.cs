@@ -63,8 +63,8 @@ namespace TerraStorage.Content.UI.CraftingTree
             else
             {
                 _state.SetPosition(
-                    (Main.screenWidth - 900) / 2f,
-                    (Main.screenHeight - 550) / 2f);
+                    (UIDrawHelpers.UiWidth - 900) / 2f,
+                    (UIDrawHelpers.UiHeight - 550) / 2f);
             }
 
             _state.OpenForItem(itemType);

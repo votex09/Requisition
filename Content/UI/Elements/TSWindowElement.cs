@@ -145,7 +145,9 @@ namespace TerraStorage.Content.UI.Elements
                 else
                 {
                     float newW = Math.Clamp(_resizeOrigW + (Main.MouseScreen.X - _resizeStart.X), WinMinWidth, WinMaxWidth);
-                    float maxH = Math.Min(WinMaxHeight, Main.screenHeight - dims.Y - 10);
+                    // Logical height, and never let max drop below min: Math.Clamp throws when
+                    // min > max, which would spam an exception every frame of the resize.
+                    float maxH = Math.Max(WinMinHeight, Math.Min(WinMaxHeight, UIDrawHelpers.UiHeight - dims.Y - 10));
                     float newH = Math.Clamp(_resizeOrigH + (Main.MouseScreen.Y - _resizeStart.Y), WinMinHeight, maxH);
                     Width.Set(newW, 0f);
                     Height.Set(newH, 0f);
@@ -167,8 +169,8 @@ namespace TerraStorage.Content.UI.Elements
                 }
                 else
                 {
-                    float nx = Math.Clamp(Main.MouseScreen.X - _dragOffset.X, 0, Main.screenWidth  - dims.Width);
-                    float ny = Math.Clamp(Main.MouseScreen.Y - _dragOffset.Y, 0, Main.screenHeight - dims.Height);
+                    float nx = Math.Clamp(Main.MouseScreen.X - _dragOffset.X, 0, Math.Max(0f, UIDrawHelpers.UiWidth  - dims.Width));
+                    float ny = Math.Clamp(Main.MouseScreen.Y - _dragOffset.Y, 0, Math.Max(0f, UIDrawHelpers.UiHeight - dims.Height));
                     Left.Set(nx, 0f);
                     Top.Set(ny, 0f);
                     Recalculate();

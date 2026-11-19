@@ -230,8 +230,8 @@ namespace TerraStorage.Content.UI
                 {
                     PanelLeft = Main.MouseScreen.X - _dragOffset.X;
                     PanelTop  = Main.MouseScreen.Y - _dragOffset.Y;
-                    PanelLeft = Math.Clamp(PanelLeft, 0, Main.screenWidth  - PanelWidth);
-                    PanelTop  = Math.Clamp(PanelTop,  0, Main.screenHeight - HeaderHeight);
+                    PanelLeft = Math.Clamp(PanelLeft, 0, Math.Max(0f, UIDrawHelpers.UiWidth - PanelWidth));
+                    PanelTop  = Math.Clamp(PanelTop,  0, Math.Max(0f, UIDrawHelpers.UiHeight - HeaderHeight));
                 }
                 return;
             }

@@ -81,7 +81,7 @@ namespace TerraStorage.Content.UI.Encyclopedia
 
         public override void OnInitialize()
         {
-            _panelHeight = Math.Min(Math.Max(500, Main.screenHeight - 200), Main.screenHeight * 0.75f);
+            _panelHeight = Math.Min(Math.Max(500, UIDrawHelpers.UiHeight - 200), UIDrawHelpers.UiHeight * 0.75f);
 
             _mainPanel = new TSWindowElement
             {
@@ -91,12 +91,12 @@ namespace TerraStorage.Content.UI.Encyclopedia
                 WinMinWidth  = PanelMinWidth,
                 WinMaxWidth  = PanelMaxWidth,
                 WinMinHeight = PanelMinHeight,
-                WinMaxHeight = (float)(Main.screenHeight * 0.85f),
+                WinMaxHeight = UIDrawHelpers.UiHeight * 0.85f,
             };
             _mainPanel.Width.Set(_panelWidth, 0f);
             _mainPanel.Height.Set(_panelHeight, 0f);
-            _mainPanel.Left.Set((Main.screenWidth - _panelWidth) / 2f, 0f);
-            _mainPanel.Top.Set((Main.screenHeight - _panelHeight) / 2f, 0f);
+            _mainPanel.Left.Set((UIDrawHelpers.UiWidth - _panelWidth) / 2f, 0f);
+            _mainPanel.Top.Set((UIDrawHelpers.UiHeight - _panelHeight) / 2f, 0f);
             _mainPanel.GetDragZone = mouse =>
             {
                 var d = _mainPanel.GetDimensions();
@@ -1208,8 +1208,8 @@ namespace TerraStorage.Content.UI.Encyclopedia
 
             float tx = Main.MouseScreen.X + 14;
             float ty = Main.MouseScreen.Y + 14;
-            if (tx + tooltipW > Main.screenWidth)  tx = Main.MouseScreen.X - tooltipW - 4;
-            if (ty + tooltipH > Main.screenHeight) ty = Main.MouseScreen.Y - tooltipH - 4;
+            if (tx + tooltipW > UIDrawHelpers.UiWidth)  tx = Main.MouseScreen.X - tooltipW - 4;
+            if (ty + tooltipH > UIDrawHelpers.UiHeight) ty = Main.MouseScreen.Y - tooltipH - 4;
 
             Utils.DrawInvBG(sb,
                 new Rectangle((int)tx - 6, (int)ty - 4, (int)tooltipW, (int)tooltipH),
